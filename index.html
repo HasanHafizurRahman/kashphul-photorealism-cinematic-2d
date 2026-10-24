@@ -410,6 +410,7 @@
                 time: 0,
                 lastTimestamp: 0,
                 smoothDt: 1 / 60,
+                smoothDt: 1 / 60,
                 speedMult: 1.0,
                 currentSpeedMult: 1.0,
                 trafficLevel: 2, // 0: Manual only, 1: Light, 2: Normal, 3: Busy
@@ -1280,8 +1281,8 @@
                 let kByteOff = 0;
                 let gByteOff = 0;
 
-                // Interleave coarse-to-fine 2D Kashful Feather Strokes (40,200) and 2D Grass Blade & Tuft Strokes (48,000)
-                for (let sc = 0; sc < 5; sc++) {
+                // Progressive non-blocking coarse-to-fine splatting so browser loads & starts animating in <15ms
+                function splatScale(sc) {
                     const kCount = KASHFUL_SCALE_COUNTS[sc];
                     const kRad = kashScaleSpecs[sc][0];
                     const kBaseA = kashScaleSpecs[sc][2];
@@ -1374,210 +1375,223 @@
                     }
                 }
 
-                // Compute luminance map & 2D Kashful vs Grass alpha directly from the 100% 2D hillsideFloat
                 const lumMap = new Float32Array(W * H_KASH);
-                for (let i = 0, p = 0; p < W * H_KASH; i += 3, p++) {
-                    lumMap[p] = 0.299 * hillsideFloat[i] + 0.587 * hillsideFloat[i + 1] + 0.114 * hillsideFloat[i + 2];
-                }
-
                 const kashAlphaRaw = new Float32Array(W * H_KASH);
-                for (let x = 0; x < W; x++) {
-                    const xn = x / W;
-                    const ySolid = getSolidGrassY(xn);
-                    let inPostCol = (xn >= 0.638 && xn <= 0.666);
-                    for (let p = 0; p < POST_BOUNDS_2D.length; p++) {
-                        if (xn >= POST_BOUNDS_2D[p][0] && xn <= POST_BOUNDS_2D[p][1]) {
-                            inPostCol = true;
-                            break;
-                        }
-                    }
-                    const inCrestZoneX = (xn >= 0.60 && xn <= 0.95) || (xn >= 0.07 && xn <= 0.41);
-
-                    for (let ky = 0; ky < H_KASH; ky++) {
-                        const y = Y0_KASH + ky;
-                        const off = (ky * W + x) * 3;
-                        const r = hillsideFloat[off], g = hillsideFloat[off + 1], b = hillsideFloat[off + 2];
-                        const lum = lumMap[ky * W + x];
-                        const gMinusB = g - b;
-                        const gMinusR = g - r;
-                        let ka = 0.0;
-
-                        if (y >= ySolid - 3.0) {
-                            const aGb = Math.min(1.0, Math.max(0.0, (28.0 - gMinusB) / 14.0));
-                            const aGr = Math.min(1.0, Math.max(0.0, (10.0 - gMinusR) / 10.0));
-                            const aLum = Math.min(1.0, Math.max(0.0, (lum - 115.0) / 28.0));
-                            const aSpikelet = Math.min(1.0, Math.max(0.0, (lum - 164.0) / 22.0)) * Math.min(1.0, Math.max(0.0, (14.0 - gMinusR) / 12.0));
-                            ka = Math.max(Math.max(aGb, aGr * 0.85) * aLum, aSpikelet);
-                            if (y > 635 && x > 140) {
-                                const aBedShadow = Math.min(1.0, Math.max(0.0, (20.0 - gMinusB) / 10.0)) * Math.min(1.0, Math.max(0.0, (lum - 86.0) / 24.0));
-                                ka = Math.max(ka, aBedShadow);
-                            }
-                        } else if (!inPostCol && inCrestZoneX && y >= ySolid - 32.0 && y < ySolid - 1.0) {
-                            const distToSolid = ySolid - y;
-                            const xL = Math.max(0, x - 6);
-                            const xR = Math.min(W - 1, x + 6);
-                            const horizBgLum = 0.5 * (lumMap[ky * W + xL] + lumMap[ky * W + xR]);
-                            if (Math.abs(r - b) < 13.0 && lum > 172.0 && (lum - horizBgLum > 5.0 || distToSolid < 12.0)) {
-                                ka = Math.min(1.0, Math.max(0.0, (32.0 - distToSolid) / 32.0)) * 0.90;
-                            }
-                        }
-                        kashAlphaRaw[ky * W + x] = ka;
-                    }
-                }
-
-                // Smooth kashAlphaRaw with a 3x3 Gaussian-like kernel for natural feathery edge blending
                 const kashAlphaSmooth = new Float32Array(W * H_KASH);
-                for (let ky = 0; ky < H_KASH; ky++) {
-                    const ky0 = Math.max(0, ky - 1), ky2 = Math.min(H_KASH - 1, ky + 1);
-                    for (let x = 0; x < W; x++) {
-                        const x0 = Math.max(0, x - 1), x2 = Math.min(W - 1, x + 1);
-                        const sum = (
-                            kashAlphaRaw[ky0 * W + x0] + 2 * kashAlphaRaw[ky0 * W + x] + kashAlphaRaw[ky0 * W + x2] +
-                            2 * kashAlphaRaw[ky * W + x0] + 4 * kashAlphaRaw[ky * W + x] + 2 * kashAlphaRaw[ky * W + x2] +
-                            kashAlphaRaw[ky2 * W + x0] + 2 * kashAlphaRaw[ky2 * W + x] + kashAlphaRaw[ky2 * W + x2]
-                        ) / 16.0;
-                        kashAlphaSmooth[ky * W + x] = sum;
-                    }
-                }
-
-                // Populate 100% 2D Grass Embankment Layer (midgroundCutoutCanvas) and 100% 2D Foreground Wheel-Occlusion Crest (fgCrestCanvas)
                 const grassImgData = midgroundCutoutCtx.createImageData(W, H);
                 const fData = grassImgData.data;
-
-                for (let x = 0; x < W; x++) {
-                    const xn = x / W;
-                    const ySolid = getSolidGrassY(xn);
-                    const yCurbLine = 494.2 + 11.5 * xn;
-
-                    for (let ky = 0; ky < H_KASH; ky++) {
-                        const y = Y0_KASH + ky;
-                        const idx = (y * W + x) * 4;
-                        const off = (ky * W + x) * 3;
-                        let r = hillsideFloat[off];
-                        let g = hillsideFloat[off + 1];
-                        let b = hillsideFloat[off + 2];
-                        const lum = lumMap[ky * W + x];
-                        const ka = kashAlphaSmooth[ky * W + x];
-
-                        if (y >= ySolid) {
-                            // Where dense Kashful plumes sit on top, keep natural olive-green grass underlayer so wind sway reveals green grass
-                            if (ka > 0.65) {
-                                const wUnder = Math.min(1.0, (ka - 0.65) / 0.30);
-                                const ty = ky / H_KASH;
-                                const gBaseR = (1.0 - ty) * 114.0 + ty * 66.0;
-                                const gBaseG = (1.0 - ty) * 136.0 + ty * 86.0;
-                                const gBaseB = (1.0 - ty) * 72.0 + ty * 42.0;
-                                const lMod = 0.70 + 0.40 * (lum / 255.0);
-                                const gr = Math.min(255.0, gBaseR * lMod);
-                                const gg = Math.min(255.0, gBaseG * lMod);
-                                const gb = Math.min(255.0, gBaseB * lMod);
-                                r = (1.0 - wUnder) * r + wUnder * gr;
-                                g = (1.0 - wUnder) * g + wUnder * gg;
-                                b = (1.0 - wUnder) * b + wUnder * gb;
-                            }
-                            fData[idx] = Math.min(255, Math.max(0, Math.round(r)));
-                            fData[idx + 1] = Math.min(255, Math.max(0, Math.round(g)));
-                            fData[idx + 2] = Math.min(255, Math.max(0, Math.round(b)));
-                            fData[idx + 3] = 255;
-                        } else if (y >= yCurbLine + 4 || (xn < 0.052 && y >= ySolid - 20)) {
-                            const distToSolid = ySolid - y;
-                            const greenness = (g > b + 9 && g > r + 2) ? Math.max(0.0, (g - b - 9.0) / 14.0) : 0.0;
-                            let aBand = Math.min(1.0, greenness);
-                            if (distToSolid <= 3.5 && y >= yCurbLine + 4) {
-                                if (ka > 0.05) {
-                                    r = (1.0 - ka) * r + ka * 102.0;
-                                    g = (1.0 - ka) * g + ka * 124.0;
-                                    b = (1.0 - ka) * b + ka * 66.0;
-                                }
-                                aBand = Math.max(aBand, (3.5 - distToSolid) / 3.5);
-                            }
-                            fData[idx] = Math.min(255, Math.max(0, Math.round(r)));
-                            fData[idx + 1] = Math.min(255, Math.max(0, Math.round(g)));
-                            fData[idx + 2] = Math.min(255, Math.max(0, Math.round(b)));
-                            fData[idx + 3] = Math.round(Math.max(0.0, Math.min(1.0, aBand)) * 255);
-                        }
-                    }
-                }
-                midgroundCutoutCtx.putImageData(grassImgData, 0, 0);
-
-                // Populate 100% Canvas 2D Kashful Plume & Barb Layer (kashful2DCanvas) from hillsideFloat + kashFloat
                 const kashImgData = kashful2DCtx.createImageData(W, H_KASH);
                 const kData = kashImgData.data;
-                for (let i = 0, p = 0, j = 0; p < W * H_KASH; i += 3, p++, j += 4) {
-                    const ka = kashAlphaSmooth[p];
-                    // Use the crisp interleaved 2D hillside strokes so every white spikelet, plume barb, and shadow crevice is preserved
-                    const kr = hillsideFloat[i] * 0.82 + kashFloat[i] * 0.18;
-                    const kg = hillsideFloat[i + 1] * 0.82 + kashFloat[i + 1] * 0.18;
-                    const kb = hillsideFloat[i + 2] * 0.82 + kashFloat[i + 2] * 0.18;
-                    kData[j] = Math.min(255, Math.max(0, Math.round(kr)));
-                    kData[j + 1] = Math.min(255, Math.max(0, Math.round(kg)));
-                    kData[j + 2] = Math.min(255, Math.max(0, Math.round(kb)));
-                    kData[j + 3] = Math.round(Math.min(1.0, Math.max(0.0, ka)) * 255);
-                }
-                kashful2DCtx.putImageData(kashImgData, 0, 0);
-                skyAndCutoutReady = true;
-
-                // Build 100% 2D Foreground Wheel-Occlusion Grass Crest (fgCrestCanvas, y = CREST_Y0..CREST_Y1)
                 const stripData = fgCrestCtx.createImageData(W, CREST_H);
                 const sData = stripData.data;
 
-                for (let x = 0; x < W; x++) {
-                    const xNorm = x / W;
-                    const ySolid = getSolidGrassY(xNorm) - CREST_Y0;
-
-                    let nearPost = false;
-                    for (let p = 0; p < POST_XS.length; p++) {
-                        if (Math.abs(xNorm - POST_XS[p]) < 0.0075) {
-                            nearPost = true;
-                            break;
-                        }
-                    }
-                    if (Math.abs(xNorm - 0.6519) < 0.012) {
-                        nearPost = true;
+                function commitHillsideToCanvases() {
+                    for (let i = 0, p = 0; p < W * H_KASH; i += 3, p++) {
+                        lumMap[p] = 0.299 * hillsideFloat[i] + 0.587 * hillsideFloat[i + 1] + 0.114 * hillsideFloat[i + 2];
                     }
 
-                    for (let y = 0; y < CREST_H; y++) {
-                        const absY = CREST_Y0 + y;
-                        const ky = absY - Y0_KASH;
-                        if (ky < 0 || ky >= H_KASH) continue;
-
-                        const idx = (y * W + x) * 4;
-                        const gIdx = (absY * W + x) * 4;
-                        const hOff = (ky * W + x) * 3;
-                        const r = fData[gIdx] > 0 ? fData[gIdx] : Math.round(hillsideFloat[hOff]);
-                        const g = fData[gIdx + 1] > 0 ? fData[gIdx + 1] : Math.round(hillsideFloat[hOff + 1]);
-                        const b = fData[gIdx + 2] > 0 ? fData[gIdx + 2] : Math.round(hillsideFloat[hOff + 2]);
-
-                        let alpha = 0.0;
-                        if (y >= ySolid) {
-                            alpha = 1.0;
-                        } else if (y >= ySolid - 22) {
-                            const t = (y - (ySolid - 22)) / 22.0;
-                            const greenness = Math.max(0.0, (g - b) / 36.0);
-                            const isSilveryKashful = (r > 165 && g > 165 && b > 160 && (r - b) < 20) ? 1.0 : 0.0;
-                            alpha = Math.min(1.0, Math.pow(t, 1.35) * 0.92 + greenness * 0.45 + isSilveryKashful * t * 0.55) * (fData[gIdx + 3] / 255.0);
-                        } else if (!nearPost && y >= ySolid - 48) {
-                            const tHigh = (y - (ySolid - 48)) / 26.0;
-                            if (xNorm < 0.052 && g > b + 12) {
-                                alpha = Math.min(1.0, ((g - b) / 32.0) * tHigh);
-                            } else if ((xNorm > 0.60 && xNorm < 0.93) || (xNorm > 0.11 && xNorm < 0.39)) {
-                                const hr = hillsideFloat[hOff], hg = hillsideFloat[hOff + 1], hb = hillsideFloat[hOff + 2];
-                                const isPlumeTip = (hr > 175 && hr < 228 && hg > 175 && hb > 172 && Math.abs(hr - hb) < 14);
-                                if (isPlumeTip) {
-                                    alpha = Math.min(0.88, tHigh * 0.78);
-                                }
+                    for (let x = 0; x < W; x++) {
+                        const xn = x / W;
+                        const ySolid = getSolidGrassY(xn);
+                        let inPostCol = (xn >= 0.638 && xn <= 0.666);
+                        for (let p = 0; p < POST_BOUNDS_2D.length; p++) {
+                            if (xn >= POST_BOUNDS_2D[p][0] && xn <= POST_BOUNDS_2D[p][1]) {
+                                inPostCol = true;
+                                break;
                             }
                         }
+                        const inCrestZoneX = (xn >= 0.60 && xn <= 0.95) || (xn >= 0.07 && xn <= 0.41);
 
-                        sData[idx] = r;
-                        sData[idx + 1] = g;
-                        sData[idx + 2] = b;
-                        sData[idx + 3] = Math.round(Math.max(0.0, Math.min(1.0, alpha)) * 255);
+                        for (let ky = 0; ky < H_KASH; ky++) {
+                            const y = Y0_KASH + ky;
+                            const off = (ky * W + x) * 3;
+                            const r = hillsideFloat[off], g = hillsideFloat[off + 1], b = hillsideFloat[off + 2];
+                            const lum = lumMap[ky * W + x];
+                            const gMinusB = g - b;
+                            const gMinusR = g - r;
+                            let ka = 0.0;
+
+                            if (y >= ySolid - 3.0) {
+                                const aGb = Math.min(1.0, Math.max(0.0, (28.0 - gMinusB) / 14.0));
+                                const aGr = Math.min(1.0, Math.max(0.0, (10.0 - gMinusR) / 10.0));
+                                const aLum = Math.min(1.0, Math.max(0.0, (lum - 115.0) / 28.0));
+                                const aSpikelet = Math.min(1.0, Math.max(0.0, (lum - 164.0) / 22.0)) * Math.min(1.0, Math.max(0.0, (14.0 - gMinusR) / 12.0));
+                                ka = Math.max(Math.max(aGb, aGr * 0.85) * aLum, aSpikelet);
+                                if (y > 635 && x > 140) {
+                                    const aBedShadow = Math.min(1.0, Math.max(0.0, (20.0 - gMinusB) / 10.0)) * Math.min(1.0, Math.max(0.0, (lum - 86.0) / 24.0));
+                                    ka = Math.max(ka, aBedShadow);
+                                }
+                            } else if (!inPostCol && inCrestZoneX && y >= ySolid - 32.0 && y < ySolid - 1.0) {
+                                const distToSolid = ySolid - y;
+                                const xL = Math.max(0, x - 6);
+                                const xR = Math.min(W - 1, x + 6);
+                                const horizBgLum = 0.5 * (lumMap[ky * W + xL] + lumMap[ky * W + xR]);
+                                if (Math.abs(r - b) < 13.0 && lum > 172.0 && (lum - horizBgLum > 5.0 || distToSolid < 12.0)) {
+                                    ka = Math.min(1.0, Math.max(0.0, (32.0 - distToSolid) / 32.0)) * 0.90;
+                                }
+                            }
+                            kashAlphaRaw[ky * W + x] = ka;
+                        }
                     }
+
+                    for (let ky = 0; ky < H_KASH; ky++) {
+                        const ky0 = Math.max(0, ky - 1), ky2 = Math.min(H_KASH - 1, ky + 1);
+                        for (let x = 0; x < W; x++) {
+                            const x0 = Math.max(0, x - 1), x2 = Math.min(W - 1, x + 1);
+                            kashAlphaSmooth[ky * W + x] = (
+                                kashAlphaRaw[ky0 * W + x0] + 2 * kashAlphaRaw[ky0 * W + x] + kashAlphaRaw[ky0 * W + x2] +
+                                2 * kashAlphaRaw[ky * W + x0] + 4 * kashAlphaRaw[ky * W + x] + 2 * kashAlphaRaw[ky * W + x2] +
+                                kashAlphaRaw[ky2 * W + x0] + 2 * kashAlphaRaw[ky2 * W + x] + kashAlphaRaw[ky2 * W + x2]
+                            ) / 16.0;
+                        }
+                    }
+
+                    for (let x = 0; x < W; x++) {
+                        const xn = x / W;
+                        const ySolid = getSolidGrassY(xn);
+                        const yCurbLine = 494.2 + 11.5 * xn;
+
+                        for (let ky = 0; ky < H_KASH; ky++) {
+                            const y = Y0_KASH + ky;
+                            const idx = (y * W + x) * 4;
+                            const off = (ky * W + x) * 3;
+                            let r = hillsideFloat[off];
+                            let g = hillsideFloat[off + 1];
+                            let b = hillsideFloat[off + 2];
+                            const lum = lumMap[ky * W + x];
+                            const ka = kashAlphaSmooth[ky * W + x];
+
+                            if (y >= ySolid) {
+                                if (ka > 0.65) {
+                                    const wUnder = Math.min(1.0, (ka - 0.65) / 0.30);
+                                    const ty = ky / H_KASH;
+                                    const gBaseR = (1.0 - ty) * 114.0 + ty * 66.0;
+                                    const gBaseG = (1.0 - ty) * 136.0 + ty * 86.0;
+                                    const gBaseB = (1.0 - ty) * 72.0 + ty * 42.0;
+                                    const lMod = 0.70 + 0.40 * (lum / 255.0);
+                                    const gr = Math.min(255.0, gBaseR * lMod);
+                                    const gg = Math.min(255.0, gBaseG * lMod);
+                                    const gb = Math.min(255.0, gBaseB * lMod);
+                                    r = (1.0 - wUnder) * r + wUnder * gr;
+                                    g = (1.0 - wUnder) * g + wUnder * gg;
+                                    b = (1.0 - wUnder) * b + wUnder * gb;
+                                }
+                                fData[idx] = Math.min(255, Math.max(0, Math.round(r)));
+                                fData[idx + 1] = Math.min(255, Math.max(0, Math.round(g)));
+                                fData[idx + 2] = Math.min(255, Math.max(0, Math.round(b)));
+                                fData[idx + 3] = 255;
+                            } else if (y >= yCurbLine + 4 || (xn < 0.052 && y >= ySolid - 20)) {
+                                const distToSolid = ySolid - y;
+                                const greenness = (g > b + 9 && g > r + 2) ? Math.max(0.0, (g - b - 9.0) / 14.0) : 0.0;
+                                let aBand = Math.min(1.0, greenness);
+                                if (distToSolid <= 3.5 && y >= yCurbLine + 4) {
+                                    if (ka > 0.05) {
+                                        r = (1.0 - ka) * r + ka * 102.0;
+                                        g = (1.0 - ka) * g + ka * 124.0;
+                                        b = (1.0 - ka) * b + ka * 66.0;
+                                    }
+                                    aBand = Math.max(aBand, (3.5 - distToSolid) / 3.5);
+                                }
+                                fData[idx] = Math.min(255, Math.max(0, Math.round(r)));
+                                fData[idx + 1] = Math.min(255, Math.max(0, Math.round(g)));
+                                fData[idx + 2] = Math.min(255, Math.max(0, Math.round(b)));
+                                fData[idx + 3] = Math.round(Math.max(0.0, Math.min(1.0, aBand)) * 255);
+                            }
+                        }
+                    }
+                    midgroundCutoutCtx.putImageData(grassImgData, 0, 0);
+
+                    for (let i = 0, p = 0, j = 0; p < W * H_KASH; i += 3, p++, j += 4) {
+                        const ka = kashAlphaSmooth[p];
+                        const kr = hillsideFloat[i] * 0.82 + kashFloat[i] * 0.18;
+                        const kg = hillsideFloat[i + 1] * 0.82 + kashFloat[i + 1] * 0.18;
+                        const kb = hillsideFloat[i + 2] * 0.82 + kashFloat[i + 2] * 0.18;
+                        kData[j] = Math.min(255, Math.max(0, Math.round(kr)));
+                        kData[j + 1] = Math.min(255, Math.max(0, Math.round(kg)));
+                        kData[j + 2] = Math.min(255, Math.max(0, Math.round(kb)));
+                        kData[j + 3] = Math.round(Math.min(1.0, Math.max(0.0, ka)) * 255);
+                    }
+                    kashful2DCtx.putImageData(kashImgData, 0, 0);
+                    skyAndCutoutReady = true;
+
+                    for (let x = 0; x < W; x++) {
+                        const xNorm = x / W;
+                        const ySolid = getSolidGrassY(xNorm) - CREST_Y0;
+
+                        let nearPost = false;
+                        for (let p = 0; p < POST_XS.length; p++) {
+                            if (Math.abs(xNorm - POST_XS[p]) < 0.0075) {
+                                nearPost = true;
+                                break;
+                            }
+                        }
+                        if (Math.abs(xNorm - 0.6519) < 0.012) {
+                            nearPost = true;
+                        }
+
+                        for (let y = 0; y < CREST_H; y++) {
+                            const absY = CREST_Y0 + y;
+                            const ky = absY - Y0_KASH;
+                            if (ky < 0 || ky >= H_KASH) continue;
+
+                            const idx = (y * W + x) * 4;
+                            const gIdx = (absY * W + x) * 4;
+                            const hOff = (ky * W + x) * 3;
+                            const r = fData[gIdx] > 0 ? fData[gIdx] : Math.round(hillsideFloat[hOff]);
+                            const g = fData[gIdx + 1] > 0 ? fData[gIdx + 1] : Math.round(hillsideFloat[hOff + 1]);
+                            const b = fData[gIdx + 2] > 0 ? fData[gIdx + 2] : Math.round(hillsideFloat[hOff + 2]);
+
+                            let alpha = 0.0;
+                            if (y >= ySolid) {
+                                alpha = 1.0;
+                            } else if (y >= ySolid - 22) {
+                                const t = (y - (ySolid - 22)) / 22.0;
+                                const greenness = Math.max(0.0, (g - b) / 36.0);
+                                const isSilveryKashful = (r > 165 && r < 256 && g > 165 && b > 160 && (r - b) < 20) ? 1.0 : 0.0;
+                                alpha = Math.min(1.0, Math.pow(t, 1.35) * 0.92 + greenness * 0.45 + isSilveryKashful * t * 0.55) * (fData[gIdx + 3] / 255.0);
+                            } else if (!nearPost && y >= ySolid - 48) {
+                                const tHigh = (y - (ySolid - 48)) / 26.0;
+                                if (xNorm < 0.052 && g > b + 12) {
+                                    alpha = Math.min(1.0, ((g - b) / 32.0) * tHigh);
+                                } else if ((xNorm > 0.60 && xNorm < 0.93) || (xNorm > 0.11 && xNorm < 0.39)) {
+                                    const hr = hillsideFloat[hOff], hg = hillsideFloat[hOff + 1], hb = hillsideFloat[hOff + 2];
+                                    const isPlumeTip = (hr > 175 && hr < 228 && hg > 175 && hb > 172 && Math.abs(hr - hb) < 14);
+                                    if (isPlumeTip) {
+                                        alpha = Math.min(0.88, tHigh * 0.78);
+                                    }
+                                }
+                            }
+
+                            sData[idx] = r;
+                            sData[idx + 1] = g;
+                            sData[idx + 2] = b;
+                            sData[idx + 3] = Math.round(Math.max(0.0, Math.min(1.0, alpha)) * 255);
+                        }
+                    }
+
+                    fgCrestCtx.putImageData(stripData, 0, 0);
+                    fgCrestReady = true;
                 }
 
-                fgCrestCtx.putImageData(stripData, 0, 0);
-                fgCrestReady = true;
+                // Splat coarse scale 0 immediately so the first frame renders right away (<15ms)
+                splatScale(0);
+                commitHillsideToCanvases();
+
+                // Progressively refine scales 1..4 across non-blocking slices so bicycle animation never stutters on load
+                let nextSc = 1;
+                function refineNextScale() {
+                    if (nextSc < 5) {
+                        splatScale(nextSc);
+                        nextSc++;
+                        if (nextSc === 3 || nextSc === 5) {
+                            commitHillsideToCanvases();
+                        }
+                        if (nextSc < 5) {
+                            setTimeout(refineNextScale, 0);
+                        }
+                    }
+                }
+                setTimeout(refineNextScale, 0);
             }
 
             buildAll2DLayers();
@@ -1608,14 +1622,51 @@
                 };
             }
 
+            // Pre-rendered offscreen sprite caches for 60fps zero-lag rendering
+            const sheenSpriteCanvas = document.createElement('canvas');
+            sheenSpriteCanvas.width = 256;
+            sheenSpriteCanvas.height = 256;
+            (function () {
+                const sCtx = sheenSpriteCanvas.getContext('2d');
+                const grad = sCtx.createRadialGradient(128, 128, 8, 128, 128, 128);
+                grad.addColorStop(0, 'rgba(255, 253, 246, 0.085)');
+                grad.addColorStop(0.55, 'rgba(244, 242, 248, 0.038)');
+                grad.addColorStop(1, 'rgba(255, 255, 255, 0)');
+                sCtx.fillStyle = grad;
+                sCtx.beginPath();
+                sCtx.arc(128, 128, 128, 0, Math.PI * 2);
+                sCtx.fill();
+            })();
+
+            const seedSpriteCanvas = document.createElement('canvas');
+            seedSpriteCanvas.width = 28;
+            seedSpriteCanvas.height = 28;
+            (function () {
+                const sdCtx = seedSpriteCanvas.getContext('2d');
+                sdCtx.translate(14, 14);
+                sdCtx.strokeStyle = 'rgba(255, 254, 250, 0.72)';
+                sdCtx.lineWidth = 0.9;
+                sdCtx.lineCap = 'round';
+                sdCtx.beginPath();
+                for (let k = 0; k < 5; k++) {
+                    const ang = (k / 5) * Math.PI * 1.35 - 0.35;
+                    sdCtx.moveTo(0, 0);
+                    sdCtx.lineTo(Math.cos(ang) * 9.5, Math.sin(ang) * 9.5);
+                }
+                sdCtx.stroke();
+                sdCtx.fillStyle = 'rgba(255, 253, 246, 0.96)';
+                sdCtx.beginPath();
+                sdCtx.arc(0, 0, 2.2, 0, Math.PI * 2);
+                sdCtx.fill();
+            })();
+
             // Initialize procedural swaying Kashful plumes & grass blades along the embankment crest and foreground
             function initEnvironmentDetails() {
                 state.crestPlumes = [];
-                // 340 swaying plumes and grass blades right along the bicycle wheel occlusion crest
-                for (let i = 0; i < 340; i++) {
-                    const xNorm = (i / 340) + (Math.random() - 0.5) * 0.005;
+                // 200 swaying plumes and grass blades right along the bicycle wheel occlusion crest
+                for (let i = 0; i < 200; i++) {
+                    const xNorm = (i / 200) + (Math.random() - 0.5) * 0.005;
                     const clampedX = Math.max(0.002, Math.min(0.998, xNorm));
-                    // Density follows the reference photo: rich Kashful plumes on right (0.50..0.95) and left-mid (0.06..0.42)
                     const isKashfulZone = (clampedX > 0.48 && clampedX < 0.96) || (clampedX > 0.06 && clampedX < 0.43) || Math.random() < 0.42;
                     const isPlume = isKashfulZone && Math.random() < 0.74;
 
@@ -1637,40 +1688,47 @@
 
                 // Midground & Foreground sweeping white Kashful panicles with silky barbs & elastic wind-whip physics
                 state.foregroundPlumes = [];
-                const totalPlumes = 290;
+                const totalPlumes = 155;
                 for (let i = 0; i < totalPlumes; i++) {
                     const t = i / totalPlumes;
-                    // Concentrate slightly in the lush Kashful zones while covering the full embankment slope (y = 0.545H .. 0.99H)
                     const randY = Math.pow(Math.random(), 0.78);
                     const y = (0.545 + randY * 0.445) * H;
                     let x = (0.015 + ((t * 1.37 + Math.random() * 0.18) % 0.975)) * W;
-                    // Avoid placing tall plumes right over the bare dirt patch on far left foreground unless higher up
                     if (x < 0.14 * W && y > 0.72 * H) {
                         x = (0.16 + Math.random() * 0.82) * W;
                     }
-                    const yNorm = (y - 0.54 * H) / (0.46 * H);
-                    const depthScale = 0.48 + Math.pow(Math.max(0, yNorm), 0.92) * 1.05;
-                    const barbCount = Math.floor(7 + depthScale * 6);
+                    const yNorm = Math.max(0, Math.min(1, (y - 0.54 * H) / (0.46 * H)));
+                    const depthScale = 0.48 + Math.pow(yNorm, 0.92) * 1.05;
+                    const barbCount = Math.floor(6 + depthScale * 4);
+                    const baseAlpha = 0.24 + yNorm * 0.16;
+                    const shade = Math.random();
                     state.foregroundPlumes.push({
                         x,
                         y,
-                        yNorm: Math.max(0, Math.min(1, yNorm)),
+                        yNorm,
                         depthScale,
                         length: (78 + Math.random() * 92) * depthScale,
-                        curveAngle: -0.78 - Math.random() * 0.36, // Natural leftward embankment breeze lean
+                        curveAngle: -0.78 - Math.random() * 0.36,
                         phase: Math.random() * Math.PI * 2,
                         freq: 2.1 + Math.random() * 1.4,
                         stiffness: 0.72 + Math.random() * 0.55,
                         width: (7.5 + Math.random() * 7.5) * depthScale,
-                        shade: Math.random(),
-                        barbCount
+                        shade,
+                        barbCount,
+                        stemColor: `rgba(118, 134, 82, ${(0.32 + yNorm * 0.22).toFixed(2)})`,
+                        plumeColor: shade > 0.42
+                            ? `rgba(246, 245, 252, ${(baseAlpha * 0.96).toFixed(2)})`
+                            : `rgba(228, 225, 238, ${(baseAlpha * 0.90).toFixed(2)})`,
+                        barbColor: shade > 0.42
+                            ? `rgba(255, 254, 252, ${(baseAlpha * 0.82).toFixed(2)})`
+                            : `rgba(236, 234, 244, ${(baseAlpha * 0.76).toFixed(2)})`
                     });
                 }
                 state.foregroundPlumes.sort((a, b) => a.y - b.y);
 
                 // Floating silky Kashful pappus seeds drifting and swirling in the windy embankment air
                 state.floatingSeeds = [];
-                for (let i = 0; i < 85; i++) {
+                for (let i = 0; i < 65; i++) {
                     const depth = 0.4 + Math.random() * 0.9;
                     state.floatingSeeds.push({
                         x: Math.random() * W,
@@ -1688,14 +1746,12 @@
             // Create a cyclist instance
             function createCyclist(archetype, xNorm, direction, customPhase) {
                 const scale = archetype.scale;
-                const wheelRadius = 21.0 * scale; // Matches exact 0.0235 * H radius in 1600x893
-                const initSpeed = archetype.baseSpeed * (0.96 + Math.random() * 0.08);
+                const wheelRadius = 21.0 * scale;
                 return {
                     archetype,
                     x: xNorm * W,
-                    direction: direction || -1, // -1 = right-to-left, +1 = left-to-right
-                    speed: initSpeed,
-                    currentSpeed: initSpeed,
+                    direction: direction || -1,
+                    speed: archetype.baseSpeed * (0.95 + Math.random() * 0.1),
                     scale,
                     wheelRadius,
                     crankAngle: customPhase !== undefined ? customPhase : Math.random() * Math.PI * 2,
@@ -1706,17 +1762,12 @@
             // Reset to exact initial composition matching the uploaded reference photo
             function resetToReferencePose() {
                 state.cyclists = [
-                    // Cyclist 1 (Lead rider in dark navy t-shirt at x = 0.635, riding left)
                     createCyclist(ARCHETYPES[0], 0.635, -1, 2.35),
-                    // Cyclist 2 (Trailing boy in sky-blue/turquoise shirt at x = 0.790, riding left)
                     createCyclist(ARCHETYPES[1], 0.790, -1, 0.85)
                 ];
-                // Match speeds smoothly so they keep their natural spacing as they glide across
-                state.cyclists[0].speed = 76;
-                state.cyclists[0].currentSpeed = 76;
-                state.cyclists[1].speed = 74;
-                state.cyclists[1].currentSpeed = 74;
-                state.spawnTimer = 3.8;
+                state.cyclists[0].speed = 106;
+                state.cyclists[1].speed = 102;
+                state.spawnTimer = 2.6;
                 updateBadgeCount();
             }
 
@@ -1730,7 +1781,6 @@
                     ? clickXNorm
                     : (dir === -1 ? 1.045 : -0.045);
 
-                // Pick an archetype (favoring the two reference cyclists 45% of the time for strong visual continuity)
                 const pool = Math.random() < 0.45
                     ? [ARCHETYPES[0], ARCHETYPES[1]]
                     : ARCHETYPES;
@@ -1739,14 +1789,12 @@
                 state.cyclists.push(c1);
 
                 if (forcePair) {
-                    // Spawn a second rider trailing closely behind like in the reference image
                     const arch2 = (arch1.id === 'ref_lead_navy')
                         ? ARCHETYPES[1]
                         : ARCHETYPES[(ARCHETYPES.indexOf(arch1) + 1) % ARCHETYPES.length];
-                    const offsetNorm = -dir * (0.135 + Math.random() * 0.04);
+                    const offsetNorm = -dir * (0.11 + Math.random() * 0.045);
                     const c2 = createCyclist(arch2, startXNorm + offsetNorm, dir);
-                    c2.speed = c1.speed * (0.98 + Math.random() * 0.03);
-                    c2.currentSpeed = c2.speed;
+                    c2.speed = c1.speed * (0.97 + Math.random() * 0.05);
                     state.cyclists.push(c2);
                 }
                 updateBadgeCount();
@@ -1773,7 +1821,6 @@
                 const clampedCos = Math.max(-1, Math.min(1, cosAngle));
                 const bendAngle = Math.acos(clampedCos);
 
-                // Knee bends forward in the direction the cyclist is facing
                 const kneeAngle = baseAngle + facingDir * bendAngle;
                 return {
                     kneeX: hipX + Math.cos(kneeAngle) * thighLen,
@@ -1781,83 +1828,414 @@
                 };
             }
 
-            // Helper to draw a tapered anatomical limb segment with directional sunlight highlight
-            function drawTaperedLimb(x1, y1, x2, y2, r1, r2, fillStyle, highlightStyle) {
+            // Helper to draw a tapered anatomical limb segment onto any 2D context
+            function drawTaperedLimbOn(tCtx, x1, y1, x2, y2, r1, r2, fillStyle, highlightStyle) {
                 const dx = x2 - x1;
                 const dy = y2 - y1;
                 const len = Math.hypot(dx, dy) || 1;
                 const nx = -dy / len;
                 const ny = dx / len;
 
-                ctx.beginPath();
-                ctx.moveTo(x1 + nx * r1, y1 + ny * r1);
-                ctx.lineTo(x2 + nx * r2, y2 + ny * r2);
-                ctx.arc(x2, y2, r2, Math.atan2(ny, nx), Math.atan2(-ny, -nx), false);
-                ctx.lineTo(x1 - nx * r1, y1 - ny * r1);
-                ctx.arc(x1, y1, r1, Math.atan2(-ny, -nx), Math.atan2(ny, nx), false);
-                ctx.closePath();
-                ctx.fillStyle = fillStyle;
-                ctx.fill();
+                tCtx.beginPath();
+                tCtx.moveTo(x1 + nx * r1, y1 + ny * r1);
+                tCtx.lineTo(x2 + nx * r2, y2 + ny * r2);
+                tCtx.arc(x2, y2, r2, Math.atan2(ny, nx), Math.atan2(-ny, -nx), false);
+                tCtx.lineTo(x1 - nx * r1, y1 - ny * r1);
+                tCtx.arc(x1, y1, r1, Math.atan2(-ny, -nx), Math.atan2(ny, nx), false);
+                tCtx.closePath();
+                tCtx.fillStyle = fillStyle;
+                tCtx.fill();
 
                 if (highlightStyle) {
-                    ctx.beginPath();
-                    ctx.moveTo(x1 + nx * (r1 * 0.85), y1 + ny * (r1 * 0.85));
-                    ctx.lineTo(x2 + nx * (r2 * 0.85), y2 + ny * (r2 * 0.85));
-                    ctx.strokeStyle = highlightStyle;
-                    ctx.lineWidth = 1.3;
-                    ctx.lineCap = 'round';
-                    ctx.stroke();
+                    tCtx.beginPath();
+                    tCtx.moveTo(x1 + nx * (r1 * 0.85), y1 + ny * (r1 * 0.85));
+                    tCtx.lineTo(x2 + nx * (r2 * 0.85), y2 + ny * (r2 * 0.85));
+                    tCtx.strokeStyle = highlightStyle;
+                    tCtx.lineWidth = 1.3;
+                    tCtx.lineCap = 'round';
+                    tCtx.stroke();
                 }
             }
 
-            // Draw a single articulated cyclist & bicycle
-            function drawCyclist(c) {
-                const arch = c.archetype;
-                const s = c.scale;
-                const dir = c.direction; // -1 moving left, +1 moving right
-                const xNorm = c.x / W;
-                const groundY = getRoadY(xNorm);
-                const R = c.wheelRadius; // ~21px * s
+            // Pre-render per-archetype 2x-supersampled Wheel Sprites, Static Diamond Frame Sprite & Rider Upper-Body Sprite
+            // Eliminates ~85% of per-frame vector path & gradient rebuilds for butter-smooth 60fps bicycle movement
+            const CYCLIST_SPRITE_CACHE = {};
+            function getCyclistSprites(arch) {
+                if (CYCLIST_SPRITE_CACHE[arch.id]) return CYCLIST_SPRITE_CACHE[arch.id];
+                const s = arch.scale;
+                const R = 21.0 * s;
+                const dpr = 2; // 2x supersampled offscreen cache for razor-sharp retina quality
 
-                ctx.save();
-                ctx.translate(c.x, groundY);
-                // Flip horizontally if riding left-to-right so local coordinates always have +X as "forward"
-                // In local coordinates: +X is forward (direction of travel), -Y is upward
-                ctx.scale(dir === 1 ? 1 : -1, 1);
+                // 1. Pre-render wheel sprite helper (spokes + rim + tire + hub)
+                function buildWheelSprite(rimColor) {
+                    const pad = 4;
+                    const dim = Math.ceil((R + pad) * 2 * dpr);
+                    const wCanvas = document.createElement('canvas');
+                    wCanvas.width = dim;
+                    wCanvas.height = dim;
+                    const wCtx = wCanvas.getContext('2d');
+                    wCtx.scale(dpr, dpr);
+                    const cx = R + pad, cy = R + pad;
 
-                // Key bicycle geometry in local coordinates (where +X is forward, ground is y=0)
+                    const numSpokes = 14;
+                    wCtx.strokeStyle = 'rgba(220, 224, 232, 0.46)';
+                    wCtx.lineWidth = 0.85 * s;
+                    wCtx.beginPath();
+                    for (let i = 0; i < numSpokes; i++) {
+                        const a = (i * Math.PI * 2) / numSpokes;
+                        wCtx.moveTo(cx, cy);
+                        wCtx.lineTo(cx + Math.cos(a) * (R - 2.5 * s), cy + Math.sin(a) * (R - 2.5 * s));
+                    }
+                    wCtx.stroke();
+
+                    // Metallic inner rim
+                    wCtx.beginPath();
+                    wCtx.arc(cx, cy, R - 2.1 * s, 0, Math.PI * 2);
+                    wCtx.strokeStyle = rimColor;
+                    wCtx.lineWidth = 2.4 * s;
+                    wCtx.stroke();
+
+                    // Outer rubber tire
+                    wCtx.beginPath();
+                    wCtx.arc(cx, cy, R, 0, Math.PI * 2);
+                    wCtx.strokeStyle = arch.tireColor;
+                    wCtx.lineWidth = 2.6 * s;
+                    wCtx.stroke();
+
+                    // Hub
+                    wCtx.beginPath();
+                    wCtx.arc(cx, cy, 2.4 * s, 0, Math.PI * 2);
+                    wCtx.fillStyle = '#8b909a';
+                    wCtx.fill();
+
+                    return { canvas: wCanvas, half: R + pad };
+                }
+
+                const rearWheel = buildWheelSprite(arch.rearRimColor);
+                const frontWheel = buildWheelSprite(arch.frontRimColor);
+
+                // Key bicycle geometry in local coordinates
                 const wheelY = -R;
                 const rearX = -1.62 * R;
                 const frontX = 1.62 * R;
-                const bbX = -0.22 * R;       // Bottom bracket (crank center)
+                const bbX = -0.22 * R;
                 const bbY = -0.92 * R;
-
-                // Diamond frame nodes
                 const seatClusterX = -0.78 * R;
                 const seatClusterY = -2.18 * R;
                 const saddleX = -0.88 * R;
                 const saddleY = -2.42 * R;
-
                 const headTubeBottomX = 1.08 * R;
                 const headTubeBottomY = -1.98 * R;
                 const headTubeTopX = 0.94 * R;
                 const headTubeTopY = -2.45 * R;
-
                 const handlebarX = 0.72 * R;
                 const handlebarY = -2.72 * R;
 
-                // Crank & Pedals
-                const crankLen = 0.46 * R;
-                const nearPedalX = bbX + Math.cos(c.crankAngle) * crankLen;
-                const nearPedalY = bbY + Math.sin(c.crankAngle) * crankLen;
-                const farPedalX = bbX + Math.cos(c.crankAngle + Math.PI) * crankLen;
-                const farPedalY = bbY + Math.sin(c.crankAngle + Math.PI) * crankLen;
+                // 2. Pre-render Static Diamond Frame + Carrier + Saddle + Fork + Handlebars + Crankring Sprite
+                const fOriginX = 2.4 * R, fOriginY = 3.2 * R;
+                const fW = Math.ceil(4.6 * R), fH = Math.ceil(3.5 * R);
+                const frameCanvas = document.createElement('canvas');
+                frameCanvas.width = fW * dpr;
+                frameCanvas.height = fH * dpr;
+                const fCtx = frameCanvas.getContext('2d');
+                fCtx.scale(dpr, dpr);
+                fCtx.translate(fOriginX, fOriginY);
+                fCtx.lineCap = 'round';
+                fCtx.lineJoin = 'round';
 
-                // Rider pelvis / hip joint (ultra-smooth, subtle pedaling micro-bob)
-                const bob = Math.sin(c.crankAngle * 2) * 0.42 * s;
+                if (arch.hasCarrier) {
+                    fCtx.beginPath();
+                    fCtx.moveTo(seatClusterX, seatClusterY + 2 * s);
+                    fCtx.lineTo(rearX - 0.35 * R, wheelY - R - 3.5 * s);
+                    fCtx.lineTo(rearX, wheelY);
+                    fCtx.strokeStyle = '#383d47';
+                    fCtx.lineWidth = 1.6 * s;
+                    fCtx.stroke();
+                }
+
+                fCtx.beginPath();
+                fCtx.moveTo(bbX, bbY);
+                fCtx.lineTo(rearX, wheelY);
+                fCtx.lineTo(seatClusterX, seatClusterY);
+                fCtx.strokeStyle = arch.frameSecondary;
+                fCtx.lineWidth = 2.3 * s;
+                fCtx.stroke();
+
+                fCtx.beginPath();
+                fCtx.moveTo(bbX, bbY - 2.8 * s);
+                fCtx.lineTo(rearX, wheelY - 1.4 * s);
+                fCtx.moveTo(bbX, bbY + 2.8 * s);
+                fCtx.lineTo(rearX, wheelY + 1.4 * s);
+                fCtx.strokeStyle = 'rgba(40, 42, 50, 0.75)';
+                fCtx.lineWidth = 1.0 * s;
+                fCtx.stroke();
+
+                fCtx.beginPath();
+                fCtx.moveTo(seatClusterX, seatClusterY);
+                fCtx.lineTo(bbX, bbY);
+                fCtx.lineTo(headTubeBottomX, headTubeBottomY);
+                fCtx.strokeStyle = arch.frameColor;
+                fCtx.lineWidth = 3.0 * s;
+                fCtx.stroke();
+
+                fCtx.beginPath();
+                fCtx.moveTo(seatClusterX, seatClusterY);
+                fCtx.lineTo(headTubeTopX, headTubeTopY);
+                fCtx.strokeStyle = arch.frameColor;
+                fCtx.lineWidth = 2.9 * s;
+                fCtx.stroke();
+
+                fCtx.beginPath();
+                fCtx.moveTo(seatClusterX, seatClusterY - 1.0 * s);
+                fCtx.lineTo(headTubeTopX, headTubeTopY - 1.0 * s);
+                fCtx.strokeStyle = 'rgba(255, 255, 255, 0.65)';
+                fCtx.lineWidth = 1.1 * s;
+                fCtx.stroke();
+
+                fCtx.beginPath();
+                fCtx.moveTo(seatClusterX, seatClusterY);
+                fCtx.lineTo(saddleX, saddleY);
+                fCtx.strokeStyle = '#9ca2ad';
+                fCtx.lineWidth = 2.0 * s;
+                fCtx.stroke();
+
+                fCtx.beginPath();
+                fCtx.moveTo(saddleX - 0.25 * R, saddleY);
+                fCtx.quadraticCurveTo(saddleX, saddleY + 2.2 * s, saddleX + 0.30 * R, saddleY - 0.5 * s);
+                fCtx.strokeStyle = '#1d1e26';
+                fCtx.lineWidth = 3.4 * s;
+                fCtx.stroke();
+
+                fCtx.beginPath();
+                fCtx.moveTo(headTubeTopX, headTubeTopY);
+                fCtx.lineTo(headTubeBottomX, headTubeBottomY);
+                fCtx.quadraticCurveTo(headTubeBottomX + 0.18 * R, (headTubeBottomY + wheelY) * 0.5, frontX, wheelY);
+                fCtx.strokeStyle = arch.forkColor;
+                fCtx.lineWidth = 3.0 * s;
+                fCtx.stroke();
+
+                fCtx.beginPath();
+                fCtx.moveTo(headTubeTopX, headTubeTopY);
+                fCtx.lineTo(headTubeTopX - 0.04 * R, handlebarY);
+                fCtx.lineTo(handlebarX, handlebarY + 0.05 * R);
+                fCtx.strokeStyle = '#cfd4dc';
+                fCtx.lineWidth = 2.2 * s;
+                fCtx.stroke();
+
+                fCtx.beginPath();
+                fCtx.moveTo(handlebarX + 0.12 * R, handlebarY + 0.06 * R);
+                fCtx.quadraticCurveTo(headTubeTopX + 0.32 * R, headTubeTopY + 0.2 * R, headTubeBottomX, headTubeBottomY);
+                fCtx.strokeStyle = 'rgba(35, 38, 46, 0.65)';
+                fCtx.lineWidth = 0.9 * s;
+                fCtx.stroke();
+
+                fCtx.beginPath();
+                fCtx.arc(bbX, bbY, 4.2 * s, 0, Math.PI * 2);
+                fCtx.fillStyle = '#2d303b';
+                fCtx.fill();
+                fCtx.strokeStyle = '#8c929e';
+                fCtx.lineWidth = 1.1 * s;
+                fCtx.stroke();
+
+                // 3. Pre-render Upper Body Sprite (Far Arm + Backpack + Pelvis + Shaded Torso + Neck + Head/Hair + Near Arm & Sleeve)
+                const bOriginX = 2.2 * R, bOriginY = 5.0 * R;
+                const bW = Math.ceil(4.4 * R), bH = Math.ceil(3.6 * R);
+                const bodyCanvas = document.createElement('canvas');
+                bodyCanvas.width = bW * dpr;
+                bodyCanvas.height = bH * dpr;
+                const bCtx = bodyCanvas.getContext('2d');
+                bCtx.scale(dpr, dpr);
+                bCtx.translate(bOriginX, bOriginY);
+
+                const hipX = saddleX + 0.08 * R;
+                const hipY = saddleY - 0.18 * R;
+                const torsoLen = 1.66 * R;
+                const shoulderX = hipX + Math.sin(arch.leanAngle) * torsoLen;
+                const shoulderY = hipY - Math.cos(arch.leanAngle) * torsoLen;
+                const gripX = handlebarX + 0.04 * R;
+                const gripY = handlebarY + 0.05 * R;
+
+                // Far arm
+                const farElbowX = (shoulderX + gripX) * 0.5 - 0.10 * R;
+                const farElbowY = (shoulderY + gripY) * 0.5 + 0.16 * R;
+                drawTaperedLimbOn(bCtx, shoulderX, shoulderY, farElbowX, farElbowY, 3.6 * s, 2.7 * s, arch.skinShadow, null);
+                drawTaperedLimbOn(bCtx, farElbowX, farElbowY, gripX, gripY, 2.6 * s, 2.0 * s, arch.skinShadow, null);
+
+                if (arch.hasBackpack) {
+                    bCtx.save();
+                    bCtx.translate((hipX + shoulderX) * 0.5 - 5.2 * s, (hipY + shoulderY) * 0.5 - 2.0 * s);
+                    bCtx.rotate(arch.leanAngle);
+                    bCtx.beginPath();
+                    bCtx.roundRect(-5.5 * s, -12 * s, 8.5 * s, 21 * s, 4 * s);
+                    bCtx.fillStyle = '#222632';
+                    bCtx.fill();
+                    bCtx.strokeStyle = '#40485c';
+                    bCtx.lineWidth = 1.0 * s;
+                    bCtx.stroke();
+                    bCtx.restore();
+                }
+
+                // Pelvis
+                bCtx.beginPath();
+                bCtx.ellipse(hipX, hipY, 6.2 * s, 5.2 * s, arch.leanAngle, 0, Math.PI * 2);
+                bCtx.fillStyle = arch.shortsColor;
+                bCtx.fill();
+
+                // Volumetric Torso
+                bCtx.save();
+                const spineAngle = Math.atan2(shoulderY - hipY, shoulderX - hipX);
+                const perpX = -Math.sin(spineAngle);
+                const perpY = Math.cos(spineAngle);
+
+                bCtx.beginPath();
+                bCtx.moveTo(hipX - perpX * 5.8 * s, hipY - perpY * 5.8 * s);
+                bCtx.quadraticCurveTo(
+                    (hipX + shoulderX) * 0.5 - perpX * 7.8 * s,
+                    (hipY + shoulderY) * 0.5 - perpY * 7.8 * s,
+                    shoulderX - perpX * 5.6 * s,
+                    shoulderY - perpY * 5.6 * s
+                );
+                bCtx.quadraticCurveTo(
+                    shoulderX + Math.cos(spineAngle) * 3.5 * s,
+                    shoulderY + Math.sin(spineAngle) * 3.5 * s,
+                    shoulderX + perpX * 5.4 * s,
+                    shoulderY + perpY * 5.4 * s
+                );
+                bCtx.quadraticCurveTo(
+                    (hipX + shoulderX) * 0.5 + perpX * 5.8 * s,
+                    (hipY + shoulderY) * 0.5 + perpY * 5.8 * s,
+                    hipX + perpX * 4.8 * s,
+                    hipY + perpY * 4.8 * s
+                );
+                bCtx.closePath();
+
+                const shirtGrad = bCtx.createLinearGradient(
+                    shoulderX + perpX * 6 * s, shoulderY + perpY * 6 * s,
+                    hipX - perpX * 7 * s, hipY - perpY * 7 * s
+                );
+                shirtGrad.addColorStop(0, arch.shirtHighlight);
+                shirtGrad.addColorStop(0.32, arch.shirtColor);
+                shirtGrad.addColorStop(1, arch.shirtShadow);
+                bCtx.fillStyle = shirtGrad;
+                bCtx.fill();
+                bCtx.restore();
+
+                // Neck, Head & Hair
+                const neckX = shoulderX + 1.8 * s;
+                const neckY = shoulderY - 3.8 * s;
+                drawTaperedLimbOn(bCtx, shoulderX, shoulderY, neckX, neckY, 3.4 * s, 2.8 * s, arch.skinColor, null);
+
+                const headX = neckX + 1.8 * s;
+                const headY = neckY - 4.8 * s;
+                bCtx.save();
+                bCtx.translate(headX, headY);
+                bCtx.rotate(0.12);
+
+                bCtx.beginPath();
+                bCtx.arc(0, 0, 5.5 * s, 0, Math.PI * 2);
+                bCtx.fillStyle = arch.skinColor;
+                bCtx.fill();
+
+                bCtx.beginPath();
+                bCtx.moveTo(4.2 * s, -2.0 * s);
+                bCtx.lineTo(6.4 * s, 0.4 * s);
+                bCtx.lineTo(4.8 * s, 1.4 * s);
+                bCtx.lineTo(4.4 * s, 4.2 * s);
+                bCtx.lineTo(0.5 * s, 5.0 * s);
+                bCtx.closePath();
+                bCtx.fillStyle = arch.skinColor;
+                bCtx.fill();
+
+                bCtx.beginPath();
+                bCtx.moveTo(4.0 * s, -3.2 * s);
+                bCtx.lineTo(6.1 * s, 0.2 * s);
+                bCtx.strokeStyle = arch.skinHighlight;
+                bCtx.lineWidth = 1.2 * s;
+                bCtx.stroke();
+
+                bCtx.beginPath();
+                bCtx.arc(-0.6 * s, -1.0 * s, 5.8 * s, Math.PI * 0.68, Math.PI * 1.92);
+                bCtx.quadraticCurveTo(3.5 * s, -4.2 * s, 2.2 * s, -1.2 * s);
+                bCtx.quadraticCurveTo(0.2 * s, -0.8 * s, -1.2 * s, 2.2 * s);
+                bCtx.closePath();
+                bCtx.fillStyle = arch.hairColor;
+                bCtx.fill();
+
+                bCtx.beginPath();
+                bCtx.arc(-0.4 * s, -1.4 * s, 5.3 * s, Math.PI * 1.15, Math.PI * 1.75);
+                bCtx.strokeStyle = 'rgba(130, 118, 115, 0.55)';
+                bCtx.lineWidth = 1.2 * s;
+                bCtx.stroke();
+                bCtx.restore();
+
+                // Near Arm & Short Sleeve
+                const nearElbowX = (shoulderX + gripX) * 0.5 - 0.14 * R;
+                const nearElbowY = (shoulderY + gripY) * 0.5 + 0.20 * R;
+                drawTaperedLimbOn(bCtx, shoulderX, shoulderY, nearElbowX, nearElbowY, 3.8 * s, 2.9 * s, arch.skinColor, arch.skinHighlight);
+                drawTaperedLimbOn(bCtx, nearElbowX, nearElbowY, gripX, gripY, 2.8 * s, 2.1 * s, arch.skinColor, arch.skinHighlight);
+
+                bCtx.beginPath();
+                bCtx.arc(gripX, gripY, 2.4 * s, 0, Math.PI * 2);
+                bCtx.fillStyle = arch.skinColor;
+                bCtx.fill();
+
+                const sleeveEndX = shoulderX + (nearElbowX - shoulderX) * arch.sleeveRatio;
+                const sleeveEndY = shoulderY + (nearElbowY - shoulderY) * arch.sleeveRatio;
+                drawTaperedLimbOn(bCtx, shoulderX, shoulderY, sleeveEndX, sleeveEndY, 4.7 * s, 4.1 * s, arch.shirtColor, arch.shirtHighlight);
+
+                const cached = {
+                    rearWheel,
+                    frontWheel,
+                    frameCanvas,
+                    fOriginX,
+                    fOriginY,
+                    fW,
+                    fH,
+                    bodyCanvas,
+                    bOriginX,
+                    bOriginY,
+                    bW,
+                    bH,
+                    shoulderX,
+                    shoulderY
+                };
+                CYCLIST_SPRITE_CACHE[arch.id] = cached;
+                return cached;
+            }
+
+            // Draw a single articulated cyclist & bicycle using pre-rendered 2x sprites + live IK legs
+            function drawCyclist(c) {
+                const arch = c.archetype;
+                const sprites = getCyclistSprites(arch);
+                const s = c.scale;
+                const dir = c.direction;
+                const xNorm = c.x / W;
+                const groundY = getRoadY(xNorm);
+                const R = c.wheelRadius;
+
+                ctx.save();
+                ctx.translate(c.x, groundY);
+                ctx.scale(dir === 1 ? 1 : -1, 1);
+
+                const wheelY = -R;
+                const rearX = -1.62 * R;
+                const frontX = 1.62 * R;
+                const bbX = -0.22 * R;
+                const bbY = -0.92 * R;
+                const saddleX = -0.88 * R;
+                const saddleY = -2.42 * R;
+
+                const crankLen = 0.46 * R;
+                const cosCrank = Math.cos(c.crankAngle);
+                const sinCrank = Math.sin(c.crankAngle);
+                const nearPedalX = bbX + cosCrank * crankLen;
+                const nearPedalY = bbY + sinCrank * crankLen;
+                const farPedalX = bbX - cosCrank * crankLen;
+                const farPedalY = bbY - sinCrank * crankLen;
+
+                const bob = Math.sin(c.crankAngle * 2) * 1.1 * s;
                 const hipX = saddleX + 0.08 * R;
                 const hipY = saddleY - 0.18 * R + bob;
-
                 const thighLen = 1.26 * R;
                 const calfLen = 1.22 * R;
 
@@ -1866,24 +2244,21 @@
                 const farAnkleY = farPedalY - 0.14 * R;
                 const farKnee = solveLegIK(hipX, hipY, farAnkleX, farAnkleY, thighLen, calfLen, -1);
 
-                // Far thigh (shorts or pants)
                 if (arch.isLongPants) {
-                    drawTaperedLimb(hipX, hipY, farKnee.kneeX, farKnee.kneeY, 5.2 * s, 3.8 * s, arch.shortsColor, null);
-                    drawTaperedLimb(farKnee.kneeX, farKnee.kneeY, farAnkleX, farAnkleY, 3.6 * s, 2.5 * s, arch.shortsColor, null);
+                    drawTaperedLimbOn(ctx, hipX, hipY, farKnee.kneeX, farKnee.kneeY, 5.2 * s, 3.8 * s, arch.shortsColor, null);
+                    drawTaperedLimbOn(ctx, farKnee.kneeX, farKnee.kneeY, farAnkleX, farAnkleY, 3.6 * s, 2.5 * s, arch.shortsColor, null);
                 } else {
                     const shortEndX = hipX + (farKnee.kneeX - hipX) * 0.62;
                     const shortEndY = hipY + (farKnee.kneeY - hipY) * 0.62;
-                    drawTaperedLimb(hipX, hipY, shortEndX, shortEndY, 5.4 * s, 4.4 * s, arch.shortsColor, null);
-                    drawTaperedLimb(shortEndX, shortEndY, farKnee.kneeX, farKnee.kneeY, 3.9 * s, 3.3 * s, arch.skinShadow, null);
-                    drawTaperedLimb(farKnee.kneeX, farKnee.kneeY, farAnkleX, farAnkleY, 3.3 * s, 2.2 * s, arch.skinShadow, null);
+                    drawTaperedLimbOn(ctx, hipX, hipY, shortEndX, shortEndY, 5.4 * s, 4.4 * s, arch.shortsColor, null);
+                    drawTaperedLimbOn(ctx, shortEndX, shortEndY, farKnee.kneeX, farKnee.kneeY, 3.9 * s, 3.3 * s, arch.skinShadow, null);
+                    drawTaperedLimbOn(ctx, farKnee.kneeX, farKnee.kneeY, farAnkleX, farAnkleY, 3.3 * s, 2.2 * s, arch.skinShadow, null);
                 }
-                // Far shoe
                 ctx.beginPath();
                 ctx.ellipse(farPedalX + 0.06 * R, farPedalY - 0.04 * R, 4.2 * s, 2.1 * s, 0.1, 0, Math.PI * 2);
                 ctx.fillStyle = arch.shoeColor;
                 ctx.fill();
 
-                // Far crank arm
                 ctx.beginPath();
                 ctx.moveTo(bbX, bbY);
                 ctx.lineTo(farPedalX, farPedalY);
@@ -1891,199 +2266,48 @@
                 ctx.lineWidth = 2.0 * s;
                 ctx.stroke();
 
-                // 2. WHEELS (Rear and Front)
-                function drawWheel(wx, wy, rimColor) {
-                    // Spokes (softened alpha and count to eliminate visual strobing)
-                    const numSpokes = 12;
-                    ctx.strokeStyle = 'rgba(220, 224, 232, 0.36)';
-                    ctx.lineWidth = 0.8 * s;
-                    for (let i = 0; i < numSpokes; i++) {
-                        const a = c.wheelAngle + (i * Math.PI * 2) / numSpokes;
-                        ctx.beginPath();
-                        ctx.moveTo(wx, wy);
-                        ctx.lineTo(wx + Math.cos(a) * (R - 2.5 * s), wy + Math.sin(a) * (R - 2.5 * s));
-                        ctx.stroke();
-                    }
+                // 2. ROTATING WHEELS (Fast GPU-composited sprite blits + rotating sunlight glint)
+                const wHalf = sprites.rearWheel.half;
+                const wDim = wHalf * 2;
+                const glintAngle = c.wheelAngle * 1.5;
+                const cosGlint = Math.cos(glintAngle), sinGlint = Math.sin(glintAngle);
 
-                    // Rotating metallic spoke sunlight glint (locked 1:1 with wheel rotation)
-                    const glintAngle = c.wheelAngle;
-                    ctx.strokeStyle = 'rgba(255, 253, 245, 0.72)';
-                    ctx.lineWidth = 1.2 * s;
-                    ctx.beginPath();
-                    ctx.moveTo(wx + Math.cos(glintAngle) * 3 * s, wy + Math.sin(glintAngle) * 3 * s);
-                    ctx.lineTo(wx + Math.cos(glintAngle) * (R - 3 * s), wy + Math.sin(glintAngle) * (R - 3 * s));
-                    ctx.stroke();
+                ctx.save();
+                ctx.translate(rearX, wheelY);
+                ctx.rotate(c.wheelAngle);
+                ctx.drawImage(sprites.rearWheel.canvas, -wHalf, -wHalf, wDim, wDim);
+                ctx.restore();
 
-                    // Metallic / Anodized Inner Rim
-                    ctx.beginPath();
-                    ctx.arc(wx, wy, R - 2.1 * s, 0, Math.PI * 2);
-                    ctx.strokeStyle = rimColor;
-                    ctx.lineWidth = 2.4 * s;
-                    ctx.stroke();
+                ctx.save();
+                ctx.translate(frontX, wheelY);
+                ctx.rotate(c.wheelAngle);
+                ctx.drawImage(sprites.frontWheel.canvas, -wHalf, -wHalf, wDim, wDim);
+                ctx.restore();
 
-                    // Outer Rubber Tire
-                    ctx.beginPath();
-                    ctx.arc(wx, wy, R, 0, Math.PI * 2);
-                    ctx.strokeStyle = arch.tireColor;
-                    ctx.lineWidth = 2.6 * s;
-                    ctx.stroke();
-
-                    // Hub
-                    ctx.beginPath();
-                    ctx.arc(wx, wy, 2.4 * s, 0, Math.PI * 2);
-                    ctx.fillStyle = '#8b909a';
-                    ctx.fill();
-                }
-
-                drawWheel(rearX, wheelY, arch.rearRimColor);
-                drawWheel(frontX, wheelY, arch.frontRimColor);
-
-                // Optional classic fenders / rear carrier rack for commuter bike
-                if (arch.hasCarrier) {
-                    ctx.beginPath();
-                    ctx.moveTo(seatClusterX, seatClusterY + 2 * s);
-                    ctx.lineTo(rearX - 0.35 * R, wheelY - R - 3.5 * s);
-                    ctx.lineTo(rearX, wheelY);
-                    ctx.strokeStyle = '#383d47';
-                    ctx.lineWidth = 1.6 * s;
-                    ctx.stroke();
-                }
-
-                // 3. BICYCLE DIAMOND FRAME
-                ctx.lineCap = 'round';
-                ctx.lineJoin = 'round';
-
-                // Chainstays & Seatstays (Rear triangle)
+                ctx.strokeStyle = 'rgba(255, 253, 245, 0.72)';
+                ctx.lineWidth = 1.2 * s;
                 ctx.beginPath();
-                ctx.moveTo(bbX, bbY);
-                ctx.lineTo(rearX, wheelY);
-                ctx.lineTo(seatClusterX, seatClusterY);
-                ctx.strokeStyle = arch.frameSecondary;
-                ctx.lineWidth = 2.3 * s;
+                ctx.moveTo(rearX + cosGlint * 3 * s, wheelY + sinGlint * 3 * s);
+                ctx.lineTo(rearX + cosGlint * (R - 3 * s), wheelY + sinGlint * (R - 3 * s));
+                ctx.moveTo(frontX + cosGlint * 3 * s, wheelY + sinGlint * 3 * s);
+                ctx.lineTo(frontX + cosGlint * (R - 3 * s), wheelY + sinGlint * (R - 3 * s));
                 ctx.stroke();
 
-                // Drive chain loop
-                ctx.beginPath();
-                ctx.moveTo(bbX, bbY - 2.8 * s);
-                ctx.lineTo(rearX, wheelY - 1.4 * s);
-                ctx.moveTo(bbX, bbY + 2.8 * s);
-                ctx.lineTo(rearX, wheelY + 1.4 * s);
-                ctx.strokeStyle = 'rgba(40, 42, 50, 0.75)';
-                ctx.lineWidth = 1.0 * s;
-                ctx.stroke();
-
-                // Seat tube & Down tube
-                ctx.beginPath();
-                ctx.moveTo(seatClusterX, seatClusterY);
-                ctx.lineTo(bbX, bbY);
-                ctx.lineTo(headTubeBottomX, headTubeBottomY);
-                ctx.strokeStyle = arch.frameColor;
-                ctx.lineWidth = 3.0 * s;
-                ctx.stroke();
-
-                // Top tube (with bright sunlight edge on top)
-                ctx.beginPath();
-                ctx.moveTo(seatClusterX, seatClusterY);
-                ctx.lineTo(headTubeTopX, headTubeTopY);
-                ctx.strokeStyle = arch.frameColor;
-                ctx.lineWidth = 2.9 * s;
-                ctx.stroke();
-
-                // Sunlit highlight on top tube & down tube
-                ctx.beginPath();
-                ctx.moveTo(seatClusterX, seatClusterY - 1.0 * s);
-                ctx.lineTo(headTubeTopX, headTubeTopY - 1.0 * s);
-                ctx.strokeStyle = 'rgba(255, 255, 255, 0.65)';
-                ctx.lineWidth = 1.1 * s;
-                ctx.stroke();
-
-                // Seatpost & Saddle
-                ctx.beginPath();
-                ctx.moveTo(seatClusterX, seatClusterY);
-                ctx.lineTo(saddleX, saddleY);
-                ctx.strokeStyle = '#9ca2ad';
-                ctx.lineWidth = 2.0 * s;
-                ctx.stroke();
-
-                ctx.beginPath();
-                ctx.moveTo(saddleX - 0.25 * R, saddleY);
-                ctx.quadraticCurveTo(saddleX, saddleY + 2.2 * s, saddleX + 0.30 * R, saddleY - 0.5 * s);
-                ctx.strokeStyle = '#1d1e26';
-                ctx.lineWidth = 3.4 * s;
-                ctx.stroke();
-
-                // Front Fork & Head tube
-                ctx.beginPath();
-                ctx.moveTo(headTubeTopX, headTubeTopY);
-                ctx.lineTo(headTubeBottomX, headTubeBottomY);
-                ctx.quadraticCurveTo(headTubeBottomX + 0.18 * R, (headTubeBottomY + wheelY) * 0.5, frontX, wheelY);
-                ctx.strokeStyle = arch.forkColor;
-                ctx.lineWidth = 3.0 * s;
-                ctx.stroke();
-
-                // Stem, Handlebars & Brake cable
-                ctx.beginPath();
-                ctx.moveTo(headTubeTopX, headTubeTopY);
-                ctx.lineTo(headTubeTopX - 0.04 * R, handlebarY);
-                ctx.lineTo(handlebarX, handlebarY + 0.05 * R);
-                ctx.strokeStyle = '#cfd4dc';
-                ctx.lineWidth = 2.2 * s;
-                ctx.stroke();
-
-                // Subtle brake cable curve
-                ctx.beginPath();
-                ctx.moveTo(handlebarX + 0.12 * R, handlebarY + 0.06 * R);
-                ctx.quadraticCurveTo(headTubeTopX + 0.32 * R, headTubeTopY + 0.2 * R, headTubeBottomX, headTubeBottomY);
-                ctx.strokeStyle = 'rgba(35, 38, 46, 0.65)';
-                ctx.lineWidth = 0.9 * s;
-                ctx.stroke();
-
-                // Crankring & Near Crank Arm
-                ctx.beginPath();
-                ctx.arc(bbX, bbY, 4.2 * s, 0, Math.PI * 2);
-                ctx.fillStyle = '#2d303b';
-                ctx.fill();
-                ctx.strokeStyle = '#8c929e';
-                ctx.lineWidth = 1.1 * s;
-                ctx.stroke();
+                // 3. STATIC BICYCLE DIAMOND FRAME SPRITE + NEAR CRANK ARM
+                ctx.drawImage(sprites.frameCanvas, -sprites.fOriginX, -sprites.fOriginY, sprites.fW, sprites.fH);
 
                 ctx.beginPath();
                 ctx.moveTo(bbX, bbY);
                 ctx.lineTo(nearPedalX, nearPedalY);
                 ctx.strokeStyle = '#abb0ba';
                 ctx.lineWidth = 2.1 * s;
+                ctx.lineCap = 'round';
                 ctx.stroke();
 
-                // 4. RIDER TORSO, PELVIS & HEAD
-                const torsoLen = 1.66 * R;
-                const shoulderX = hipX + Math.sin(arch.leanAngle) * torsoLen;
-                const shoulderY = hipY - Math.cos(arch.leanAngle) * torsoLen;
-
-                // Far Arm (reaching handlebar behind torso)
-                const gripX = handlebarX + 0.04 * R;
-                const gripY = handlebarY + 0.05 * R;
-                const farElbowX = (shoulderX + gripX) * 0.5 - 0.10 * R;
-                const farElbowY = (shoulderY + gripY) * 0.5 + 0.16 * R;
-                drawTaperedLimb(shoulderX, shoulderY, farElbowX, farElbowY, 3.6 * s, 2.7 * s, arch.skinShadow, null);
-                drawTaperedLimb(farElbowX, farElbowY, gripX, gripY, 2.6 * s, 2.0 * s, arch.skinShadow, null);
-
-                // Optional school/sport backpack on back
-                if (arch.hasBackpack) {
-                    ctx.save();
-                    ctx.translate((hipX + shoulderX) * 0.5 - 5.2 * s, (hipY + shoulderY) * 0.5 - 2.0 * s);
-                    ctx.rotate(arch.leanAngle);
-                    ctx.beginPath();
-                    ctx.roundRect(-5.5 * s, -12 * s, 8.5 * s, 21 * s, 4 * s);
-                    ctx.fillStyle = '#222632';
-                    ctx.fill();
-                    ctx.strokeStyle = '#40485c';
-                    ctx.lineWidth = 1.0 * s;
-                    ctx.stroke();
-                    ctx.restore();
-                }
-
-                // Optional fluttering scarf end (amplified in windy weather)
+                // 4. OPTIONAL FLUTTERING SCARF + CACHED UPPER BODY SPRITE + NEAR IK LEG
                 if (arch.hasScarf) {
+                    const shoulderX = sprites.shoulderX;
+                    const shoulderY = sprites.shoulderY + bob;
                     const wBoost = 0.7 + state.windMult * 0.65;
                     const scarfWave = Math.sin(state.time * (8.5 + state.windMult * 2.2) + c.x * 0.05) * 5.2 * s * wBoost;
                     const scarfWhip = Math.cos(state.time * 13.0 + c.x * 0.08) * 2.8 * s * wBoost;
@@ -2099,57 +2323,11 @@
                     );
                     ctx.strokeStyle = arch.shirtHighlight;
                     ctx.lineWidth = 3.2 * s;
-                    ctx.lineCap = 'round';
                     ctx.stroke();
                 }
 
-                // Pelvis / Shorts Seat Wrap
-                ctx.beginPath();
-                ctx.ellipse(hipX, hipY, 6.2 * s, 5.2 * s, arch.leanAngle, 0, Math.PI * 2);
-                ctx.fillStyle = arch.shortsColor;
-                ctx.fill();
-
-                // Volumetric Torso (T-Shirt / Shirt with curved back and sunlit chest edge)
-                ctx.save();
-                const spineAngle = Math.atan2(shoulderY - hipY, shoulderX - hipX);
-                const perpX = -Math.sin(spineAngle);
-                const perpY = Math.cos(spineAngle);
-
-                ctx.beginPath();
-                // Back contour (slightly arched)
-                ctx.moveTo(hipX - perpX * 5.8 * s, hipY - perpY * 5.8 * s);
-                ctx.quadraticCurveTo(
-                    (hipX + shoulderX) * 0.5 - perpX * 7.8 * s,
-                    (hipY + shoulderY) * 0.5 - perpY * 7.8 * s,
-                    shoulderX - perpX * 5.6 * s,
-                    shoulderY - perpY * 5.6 * s
-                );
-                // Shoulder cap
-                ctx.quadraticCurveTo(
-                    shoulderX + Math.cos(spineAngle) * 3.5 * s,
-                    shoulderY + Math.sin(spineAngle) * 3.5 * s,
-                    shoulderX + perpX * 5.4 * s,
-                    shoulderY + perpY * 5.4 * s
-                );
-                // Front chest/stomach contour
-                ctx.quadraticCurveTo(
-                    (hipX + shoulderX) * 0.5 + perpX * 5.8 * s,
-                    (hipY + shoulderY) * 0.5 + perpY * 5.8 * s,
-                    hipX + perpX * 4.8 * s,
-                    hipY + perpY * 4.8 * s
-                );
-                ctx.closePath();
-
-                const shirtGrad = ctx.createLinearGradient(
-                    shoulderX + perpX * 6 * s, shoulderY + perpY * 6 * s,
-                    hipX - perpX * 7 * s, hipY - perpY * 7 * s
-                );
-                shirtGrad.addColorStop(0, arch.shirtHighlight);
-                shirtGrad.addColorStop(0.32, arch.shirtColor);
-                shirtGrad.addColorStop(1, arch.shirtShadow);
-                ctx.fillStyle = shirtGrad;
-                ctx.fill();
-                ctx.restore();
+                // Draw cached upper body (with subtle pedaling bob) before near thigh so shorts/hip blend seamlessly
+                ctx.drawImage(sprites.bodyCanvas, -sprites.bOriginX, -sprites.bOriginY + bob, sprites.bW, sprites.bH);
 
                 // 5. NEAR LEG (Front leg with sunlit knee/shin highlight)
                 const nearAnkleX = nearPedalX - 0.08 * R;
@@ -2157,19 +2335,18 @@
                 const nearKnee = solveLegIK(hipX, hipY, nearAnkleX, nearAnkleY, thighLen, calfLen, 1);
 
                 if (arch.isLongPants) {
-                    drawTaperedLimb(hipX, hipY, nearKnee.kneeX, nearKnee.kneeY, 5.8 * s, 4.1 * s, arch.shortsColor, arch.shortsHighlight);
-                    drawTaperedLimb(nearKnee.kneeX, nearKnee.kneeY, nearAnkleX, nearAnkleY, 3.9 * s, 2.7 * s, arch.shortsColor, arch.shortsHighlight);
+                    drawTaperedLimbOn(ctx, hipX, hipY, nearKnee.kneeX, nearKnee.kneeY, 5.8 * s, 4.1 * s, arch.shortsColor, arch.shortsHighlight);
+                    drawTaperedLimbOn(ctx, nearKnee.kneeX, nearKnee.kneeY, nearAnkleX, nearAnkleY, 3.9 * s, 2.7 * s, arch.shortsColor, arch.shortsHighlight);
                 } else {
-                    // Bare lower leg + shorts wrapping upper thigh
                     const shortEndX = hipX + (nearKnee.kneeX - hipX) * 0.58;
                     const shortEndY = hipY + (nearKnee.kneeY - hipY) * 0.58;
-                    drawTaperedLimb(hipX, hipY, nearKnee.kneeX, nearKnee.kneeY, 5.2 * s, 3.6 * s, arch.skinColor, arch.skinHighlight);
-                    drawTaperedLimb(hipX, hipY, shortEndX, shortEndY, 6.0 * s, 4.9 * s, arch.shortsColor, arch.shortsHighlight);
-                    drawTaperedLimb(nearKnee.kneeX, nearKnee.kneeY, nearAnkleX, nearAnkleY, 3.6 * s, 2.3 * s, arch.skinColor, arch.skinHighlight);
+                    drawTaperedLimbOn(ctx, hipX, hipY, nearKnee.kneeX, nearKnee.kneeY, 5.2 * s, 3.6 * s, arch.skinColor, arch.skinHighlight);
+                    drawTaperedLimbOn(ctx, hipX, hipY, shortEndX, shortEndY, 6.0 * s, 4.9 * s, arch.shortsColor, arch.shortsHighlight);
+                    drawTaperedLimbOn(ctx, nearKnee.kneeX, nearKnee.kneeY, nearAnkleX, nearAnkleY, 3.6 * s, 2.3 * s, arch.skinColor, arch.skinHighlight);
                 }
 
-                // Near Foot / Shoe on Pedal (gentle ankle articulation)
-                const footTilt = Math.sin(c.crankAngle) * 0.13;
+                // Near Foot / Shoe on Pedal
+                const footTilt = sinCrank * 0.22;
                 ctx.save();
                 ctx.translate(nearPedalX, nearPedalY);
                 ctx.rotate(footTilt);
@@ -2177,84 +2354,9 @@
                 ctx.ellipse(1.2 * s, -1.2 * s, 4.6 * s, 2.2 * s, 0, 0, Math.PI * 2);
                 ctx.fillStyle = arch.shoeColor;
                 ctx.fill();
-                // Pedal platform
                 ctx.fillStyle = '#16171d';
                 ctx.fillRect(-3.0 * s, -0.5 * s, 6.0 * s, 1.8 * s);
                 ctx.restore();
-
-                // 6. NECK, HEAD & HAIR (Matching reference photo profile)
-                const neckX = shoulderX + 1.8 * s;
-                const neckY = shoulderY - 3.8 * s;
-                drawTaperedLimb(shoulderX, shoulderY, neckX, neckY, 3.4 * s, 2.8 * s, arch.skinColor, null);
-
-                const headX = neckX + 1.8 * s;
-                const headY = neckY - 4.8 * s;
-
-                // Head base & jaw/nose facial profile
-                ctx.save();
-                ctx.translate(headX, headY);
-                ctx.rotate(0.12); // Slight downward-forward gaze along the path
-
-                // Cranium & jaw
-                ctx.beginPath();
-                ctx.arc(0, 0, 5.5 * s, 0, Math.PI * 2);
-                ctx.fillStyle = arch.skinColor;
-                ctx.fill();
-
-                // Nose & chin profile facing +X
-                ctx.beginPath();
-                ctx.moveTo(4.2 * s, -2.0 * s);
-                ctx.lineTo(6.4 * s, 0.4 * s);
-                ctx.lineTo(4.8 * s, 1.4 * s);
-                ctx.lineTo(4.4 * s, 4.2 * s);
-                ctx.lineTo(0.5 * s, 5.0 * s);
-                ctx.closePath();
-                ctx.fillStyle = arch.skinColor;
-                ctx.fill();
-
-                // Sunlit forehead/nose highlight
-                ctx.beginPath();
-                ctx.moveTo(4.0 * s, -3.2 * s);
-                ctx.lineTo(6.1 * s, 0.2 * s);
-                ctx.strokeStyle = arch.skinHighlight;
-                ctx.lineWidth = 1.2 * s;
-                ctx.stroke();
-
-                // Hair cap (cropped dark hair with crown sun sheen like Cyclist 1 & 2)
-                ctx.beginPath();
-                ctx.arc(-0.6 * s, -1.0 * s, 5.8 * s, Math.PI * 0.68, Math.PI * 1.92);
-                ctx.quadraticCurveTo(3.5 * s, -4.2 * s, 2.2 * s, -1.2 * s);
-                ctx.quadraticCurveTo(0.2 * s, -0.8 * s, -1.2 * s, 2.2 * s);
-                ctx.closePath();
-                ctx.fillStyle = arch.hairColor;
-                ctx.fill();
-
-                // Subtle crown highlight on hair
-                ctx.beginPath();
-                ctx.arc(-0.4 * s, -1.4 * s, 5.3 * s, Math.PI * 1.15, Math.PI * 1.75);
-                ctx.strokeStyle = 'rgba(130, 118, 115, 0.55)';
-                ctx.lineWidth = 1.2 * s;
-                ctx.stroke();
-                ctx.restore();
-
-                // 7. NEAR ARM & SHORT SLEEVE (Foreground arm with bright sunlit forearm highlight)
-                const nearElbowX = (shoulderX + gripX) * 0.5 - 0.14 * R;
-                const nearElbowY = (shoulderY + gripY) * 0.5 + 0.20 * R;
-
-                // Upper arm bare skin + forearm reaching handlebar grip
-                drawTaperedLimb(shoulderX, shoulderY, nearElbowX, nearElbowY, 3.8 * s, 2.9 * s, arch.skinColor, arch.skinHighlight);
-                drawTaperedLimb(nearElbowX, nearElbowY, gripX, gripY, 2.8 * s, 2.1 * s, arch.skinColor, arch.skinHighlight);
-
-                // Hand gripping handlebar
-                ctx.beginPath();
-                ctx.arc(gripX, gripY, 2.4 * s, 0, Math.PI * 2);
-                ctx.fillStyle = arch.skinColor;
-                ctx.fill();
-
-                // Shirt sleeve covering upper arm
-                const sleeveEndX = shoulderX + (nearElbowX - shoulderX) * arch.sleeveRatio;
-                const sleeveEndY = shoulderY + (nearElbowY - shoulderY) * arch.sleeveRatio;
-                drawTaperedLimb(shoulderX, shoulderY, sleeveEndX, sleeveEndY, 4.7 * s, 4.1 * s, arch.shirtColor, arch.shirtHighlight);
 
                 ctx.restore();
             }
@@ -2272,14 +2374,12 @@
                     const localOsc = Math.sin(t * p.speed * 1.65 + p.xNorm * 14.0 + p.phase) * 7.5 * wind * p.stiffness;
                     const whip = Math.cos(t * p.speed * 3.1 + p.phase * 1.7) * 3.8 * wf.gustEnv;
 
-                    // Elastic wind deflection: strong leftward bend + vertical bowing under gust pressure
                     const dxWind = -(wf.surge * 11.5 + localOsc + whip) * p.stiffness;
                     const bendAngle = Math.max(-1.38, Math.min(0.45, p.lean + (dxWind / Math.max(18, p.height)) * 0.85));
                     const tipX = x + Math.sin(bendAngle) * p.height + dxWind * 0.35;
                     const tipY = y - Math.cos(bendAngle) * p.height + Math.min(p.height * 0.38, Math.abs(dxWind) * 0.24);
 
                     if (!p.isPlume) {
-                        // Sharp green embankment grass blade bending in the gust
                         const ctrlX = x + (tipX - x) * 0.42;
                         const ctrlY = y - p.height * 0.58;
                         ctx.beginPath();
@@ -2289,7 +2389,6 @@
                         ctx.lineWidth = p.width;
                         ctx.stroke();
                     } else {
-                        // Flexible green culm (stem) + multi-barb feathery white Kashful panicle
                         const stemMidX = x + (tipX - x) * 0.36;
                         const stemMidY = y + (tipY - y) * 0.44;
                         ctx.beginPath();
@@ -2299,7 +2398,6 @@
                         ctx.lineWidth = 1.15;
                         ctx.stroke();
 
-                        // Main feathery panicle rachis with S-curve whip
                         const ctrlX = stemMidX + (tipX - stemMidX) * 0.48 - 3.5 * wind;
                         const ctrlY = stemMidY + (tipY - stemMidY) * 0.35 - 3.0;
                         ctx.beginPath();
@@ -2309,22 +2407,23 @@
                         ctx.lineWidth = p.width * (1.05 + wf.gustEnv * 0.2);
                         ctx.stroke();
 
-                        // Silky side-barbs fanning out in the wind along the crest plume
+                        // Batch all 6 side-barbs into a single path & single stroke call
                         ctx.strokeStyle = 'rgba(255, 254, 255, 0.68)';
                         ctx.lineWidth = 0.95;
+                        ctx.beginPath();
                         for (let b = 1; b <= 3; b++) {
-                            const u = b / 4;
-                            const bx = (1 - u) * (1 - u) * stemMidX + 2 * (1 - u) * u * ctrlX + u * u * tipX;
-                            const by = (1 - u) * (1 - u) * stemMidY + 2 * (1 - u) * u * ctrlY + u * u * tipY;
+                            const u = b * 0.25;
+                            const invU = 1 - u;
+                            const bx = invU * invU * stemMidX + 2 * invU * u * ctrlX + u * u * tipX;
+                            const by = invU * invU * stemMidY + 2 * invU * u * ctrlY + u * u * tipY;
                             const barbLen = (6.5 + (3 - b) * 2.5) * (0.85 + wf.gustEnv * 0.3);
                             const barbFlutter = Math.sin(t * 9.0 + i + b * 1.9) * 2.2 * wind;
-                            ctx.beginPath();
                             ctx.moveTo(bx, by);
                             ctx.lineTo(bx - barbLen, by - 2.5 + barbFlutter);
                             ctx.moveTo(bx, by);
                             ctx.lineTo(bx - barbLen * 0.85, by + 2.2 - barbFlutter * 0.7);
-                            ctx.stroke();
                         }
+                        ctx.stroke();
                     }
                 }
                 ctx.restore();
@@ -2336,50 +2435,36 @@
                 ctx.save();
                 ctx.lineCap = 'round';
 
-                // 1. Subtle cinematic sunlit gust-sheen waves rolling right-to-left across the Kashful meadow
+                // 1. Fast pre-rendered sheen sprite blits rolling right-to-left across the Kashful meadow
                 if (wind > 0.08) {
+                    ctx.save();
+                    ctx.globalAlpha = Math.min(1.0, wind * 0.55);
                     for (let g = 0; g < 4; g++) {
-                        // Wave center travels from right (W + 260) to left (-260)
                         const cycle = ((t * (165 + g * 28) * Math.min(2.2, 0.55 + wind * 0.55) + g * 470) % (W + 560));
                         const gx = W + 280 - cycle;
                         const gy = (0.62 + (g % 3) * 0.11) * H;
                         const gRadX = 220 + g * 35;
                         const gRadY = 68 + g * 18;
-
-                        ctx.save();
-                        ctx.translate(gx, gy);
-                        ctx.rotate(-0.14);
-                        ctx.scale(1, gRadY / gRadX);
-                        const sheenAlpha = Math.min(0.11, 0.038 * wind);
-                        const sheenGrad = ctx.createRadialGradient(0, 0, 10, 0, 0, gRadX);
-                        sheenGrad.addColorStop(0, `rgba(255, 253, 246, ${sheenAlpha})`);
-                        sheenGrad.addColorStop(0.55, `rgba(244, 242, 248, ${sheenAlpha * 0.45})`);
-                        sheenGrad.addColorStop(1, 'rgba(255, 255, 255, 0)');
-                        ctx.fillStyle = sheenGrad;
-                        ctx.beginPath();
-                        ctx.arc(0, 0, gRadX, 0, Math.PI * 2);
-                        ctx.fill();
-                        ctx.restore();
+                        ctx.drawImage(sheenSpriteCanvas, gx - gRadX, gy - gRadY, gRadX * 2, gRadY * 2);
                     }
+                    ctx.restore();
                 }
 
-                // 2. Multi-layered silky white Kashful panicles bending, whipping, and rippling in the wind
+                // 2. Multi-layered silky white Kashful panicles with batched barbs & zero per-frame gradient allocations
+                const windClamped = Math.min(2.0, wind);
                 for (let i = 0; i < state.foregroundPlumes.length; i++) {
                     const fp = state.foregroundPlumes[i];
                     const xNorm = fp.x / W;
                     const wf = getWindField(xNorm, fp.yNorm, t);
 
-                    // Individual stem oscillation + traveling gust surge + high-frequency tip whip
                     const swayOsc = Math.sin(t * fp.freq + fp.x * 0.011 + fp.phase) * 16.0 * wind * fp.stiffness;
                     const gustPush = wf.surge * 22.0 * fp.stiffness;
                     const tipWhip = Math.sin(t * (fp.freq * 2.4) + fp.phase * 2.1) * 8.5 * wf.gustEnv;
 
-                    // Angle bends further toward horizontal (-1.42 rad) when a strong gust hits, bowing the plume downward
                     const dynamicBend = ((swayOsc + gustPush) / Math.max(55, fp.length)) * 0.58;
                     const baseAngle = Math.max(-1.46, Math.min(-0.32, fp.curveAngle - dynamicBend));
                     const tipAngle = Math.max(-1.54, Math.min(-0.20, baseAngle - (tipWhip / Math.max(55, fp.length)) * 0.65));
 
-                    // Cubic Bezier control points for realistic elastic botanical rachis curvature
                     const cp1X = fp.x + Math.sin(baseAngle * 0.72) * fp.length * 0.36;
                     const cp1Y = fp.y - Math.cos(baseAngle * 0.72) * fp.length * 0.34;
                     const cp2X = fp.x + Math.sin(baseAngle * 0.94) * fp.length * 0.70 - gustPush * 0.25;
@@ -2387,52 +2472,39 @@
                     const endX = fp.x + Math.sin(tipAngle) * fp.length - (gustPush * 0.42 + tipWhip * 0.65);
                     const endY = fp.y - Math.cos(tipAngle) * fp.length * 0.56 + Math.min(fp.length * 0.28, Math.abs(gustPush + swayOsc) * 0.16);
 
-                    // Subtle green-ochre stem base anchoring the panicle into the meadow
                     const stemBaseX = fp.x - Math.sin(baseAngle * 0.5) * (14 * fp.depthScale);
                     const stemBaseY = fp.y + Math.cos(baseAngle * 0.5) * (12 * fp.depthScale);
                     ctx.beginPath();
                     ctx.moveTo(stemBaseX, stemBaseY);
                     ctx.lineTo(fp.x, fp.y);
-                    ctx.strokeStyle = `rgba(118, 134, 82, ${0.32 + fp.yNorm * 0.22})`;
+                    ctx.strokeStyle = fp.stemColor;
                     ctx.lineWidth = Math.max(0.9, 1.45 * fp.depthScale);
                     ctx.stroke();
 
-                    // Rich, luminous Kashful plume opacity that shimmers brighter during wind gusts
-                    const baseAlpha = 0.24 + fp.yNorm * 0.16 + Math.min(0.14, wf.gustEnv * 0.09);
-
-                    // Draw fluffy central plume body + crisp sunlit rachis spine
+                    // Central plume body
                     ctx.beginPath();
                     ctx.moveTo(fp.x, fp.y);
                     ctx.bezierCurveTo(cp1X, cp1Y, cp2X, cp2Y, endX, endY);
-                    ctx.strokeStyle = fp.shade > 0.42
-                        ? `rgba(244, 242, 250, ${baseAlpha * 0.96})`
-                        : `rgba(226, 223, 236, ${baseAlpha * 0.90})`;
+                    ctx.strokeStyle = fp.plumeColor;
                     ctx.lineWidth = fp.width * 0.30;
                     ctx.stroke();
 
-                    // Dense, fluttering silky white barbs (hairs) fanning out from the panicle rachis
+                    // Batch all barbs of this panicle into a single path & single stroke call
                     const nBarbs = fp.barbCount;
                     ctx.lineWidth = Math.max(0.75, 1.05 * fp.depthScale);
+                    ctx.strokeStyle = fp.barbColor;
+                    ctx.beginPath();
                     for (let b = 1; b <= nBarbs; b++) {
                         const u = b / (nBarbs + 1);
                         const invU = 1 - u;
-                        // Point on cubic Bezier rachis
                         const bx = invU * invU * invU * fp.x + 3 * invU * invU * u * cp1X + 3 * invU * u * u * cp2X + u * u * u * endX;
                         const by = invU * invU * invU * fp.y + 3 * invU * invU * u * cp1Y + 3 * invU * u * u * cp2Y + u * u * u * endY;
 
-                        // Taper barb length (fullest in middle-upper panicle, tapering at base and tip)
                         const envelope = Math.sin(u * Math.PI) * (1.15 - u * 0.25);
                         const barbLen = (15 + fp.width * 1.45) * envelope * (0.9 + wf.gustEnv * 0.25);
-                        const flutterY = Math.sin(t * 8.5 + fp.phase + b * 1.35) * (2.8 * fp.depthScale) * Math.min(2.0, wind);
-                        const flutterX = Math.cos(t * 6.2 + i * 0.5 + b) * (2.2 * fp.depthScale) * Math.min(2.0, wind);
+                        const flutterY = Math.sin(t * 8.5 + fp.phase + b * 1.35) * (2.8 * fp.depthScale) * windClamped;
+                        const flutterX = Math.cos(t * 6.2 + i * 0.5 + b) * (2.2 * fp.depthScale) * windClamped;
 
-                        const barbAlpha = baseAlpha * (0.68 + 0.28 * envelope);
-                        ctx.strokeStyle = (b % 2 === 0)
-                            ? `rgba(255, 254, 252, ${barbAlpha})`
-                            : `rgba(234, 232, 242, ${barbAlpha * 0.88})`;
-
-                        // Upper/leeward silky filament
-                        ctx.beginPath();
                         ctx.moveTo(bx, by);
                         ctx.quadraticCurveTo(
                             bx - barbLen * 0.55 + flutterX * 0.4,
@@ -2440,11 +2512,8 @@
                             bx - barbLen + flutterX,
                             by - barbLen * 0.38 + flutterY
                         );
-                        ctx.stroke();
 
-                        // Lower/windward silky filament (swept back into the leeward stream)
-                        if (b % 2 === 1) {
-                            ctx.beginPath();
+                        if (b & 1) {
                             ctx.moveTo(bx, by);
                             ctx.quadraticCurveTo(
                                 bx - barbLen * 0.45,
@@ -2452,62 +2521,54 @@
                                 bx - barbLen * 0.88 + flutterX * 0.7,
                                 by + barbLen * 0.08 - flutterY * 0.6
                             );
-                            ctx.stroke();
                         }
                     }
+                    ctx.stroke();
                 }
 
-                // 3. Airborne silky Kashful pappus seeds (with fine radiating parachute filaments) drifting in the wind
+                // 3. Airborne silky Kashful pappus seeds using pre-rendered sprite
+                const windSeedFactor = Math.min(1.0, 0.45 + wind * 0.45);
                 for (let i = 0; i < state.floatingSeeds.length; i++) {
                     const s = state.floatingSeeds[i];
-                    const seedAlpha = s.alpha * Math.min(1.0, 0.45 + wind * 0.45);
+                    const seedAlpha = s.alpha * windSeedFactor;
                     if (seedAlpha <= 0.05) continue;
-
-                    ctx.save();
-                    ctx.translate(s.x, s.y);
-                    ctx.rotate(state.time * s.spin + s.phase);
-
-                    // Fine silky pappus hairs radiating from the seed core
-                    ctx.strokeStyle = `rgba(255, 254, 250, ${seedAlpha * 0.65})`;
-                    ctx.lineWidth = 0.75;
-                    const rFil = s.size * 2.9;
-                    ctx.beginPath();
-                    for (let k = 0; k < 5; k++) {
-                        const ang = (k / 5) * Math.PI * 1.35 - 0.35;
-                        ctx.moveTo(0, 0);
-                        ctx.lineTo(Math.cos(ang) * rFil, Math.sin(ang) * rFil);
-                    }
-                    ctx.stroke();
-
-                    // Luminous sunlit seed core
-                    ctx.fillStyle = `rgba(255, 253, 246, ${seedAlpha})`;
-                    ctx.beginPath();
-                    ctx.arc(0, 0, s.size * 0.75, 0, Math.PI * 2);
-                    ctx.fill();
-                    ctx.restore();
+                    const drawDim = s.size * 8.5;
+                    const halfDim = drawDim * 0.5;
+                    ctx.globalAlpha = seedAlpha;
+                    ctx.drawImage(seedSpriteCanvas, s.x - halfDim, s.y - halfDim, drawDim, drawDim);
                 }
+                ctx.globalAlpha = 1.0;
                 ctx.restore();
             }
 
-            // Render 100% Canvas 2D Embankment Trees (with realistic windy canopy & branch sway), 2D Solar Streetlamp & 2D Road Corridor
+            // Render 100% Canvas 2D Embankment Trees (slicing only the 4 compact tree bounding boxes), 2D Solar Streetlamp & 2D Road Corridor
             function draw2DTreesAndLampWithBreeze(t) {
                 const wind = state.windMult;
-                // 1. Background 2D Embankment Trees (drawn in overlapping horizontal strips so upper crowns sway in the wind with zero horizontal seams)
-                const yTreeStart = 350 - Y0_TREES_LAMP;
-                const yTreeEnd = H_TREES_LAMP;
-                const treeH = yTreeEnd - yTreeStart;
-                ctx.drawImage(treesBg2DCanvas, 0, Y0_TREES_LAMP);
-                if (wind > 0.04) {
-                    const nStrips = 16;
-                    const stripH = Math.ceil(treeH / nStrips);
+                if (wind <= 0.04) {
+                    ctx.drawImage(treesBg2DCanvas, 0, Y0_TREES_LAMP);
+                } else {
+                    const nStrips = 8;
                     const gust = 0.65 + 0.55 * Math.sin(t * 2.15) + 0.35 * Math.cos(t * 3.7);
-                    for (let s = 0; s < nStrips; s++) {
-                        const sy = yTreeStart + s * stripH;
-                        const sh = Math.min(stripH + 2, yTreeEnd - sy);
-                        if (sh <= 0) break;
-                        const crownFactor = Math.max(0, 1.0 - (s / (nStrips - 1)));
-                        const swayX = (Math.sin(t * 3.1 + s * 0.32) * 4.2 + Math.cos(t * 1.9 - s * 0.2) * 2.4 - 2.8 * gust) * Math.pow(crownFactor, 1.35) * wind;
-                        ctx.drawImage(treesBg2DCanvas, 0, sy, W, sh, swayX, Y0_TREES_LAMP + sy, W, sh);
+                    for (let ti = 0; ti < TREE_BOXES_2D.length; ti++) {
+                        const box = TREE_BOXES_2D[ti];
+                        const bx0 = Math.max(0, box[0] - 8);
+                        const bw = Math.min(W - bx0, (box[1] - box[0]) + 16);
+                        const yTreeStart = box[2] - Y0_TREES_LAMP;
+                        const yTreeEnd = box[3] - Y0_TREES_LAMP;
+                        const treeH = yTreeEnd - yTreeStart;
+                        const stripH = Math.ceil(treeH / nStrips);
+
+                        // Base stationary tree trunk/canopy anchor within its compact box
+                        ctx.drawImage(treesBg2DCanvas, bx0, yTreeStart, bw, treeH, bx0, box[2], bw, treeH);
+
+                        for (let s = 0; s < nStrips; s++) {
+                            const sy = yTreeStart + s * stripH;
+                            const sh = Math.min(stripH + 2, yTreeEnd - sy);
+                            if (sh <= 0) break;
+                            const crownFactor = Math.max(0, 1.0 - (s / (nStrips - 1)));
+                            const swayX = (Math.sin(t * 3.1 + s * 0.55 + ti) * 4.2 + Math.cos(t * 1.9 - s * 0.35) * 2.4 - 2.8 * gust) * Math.pow(crownFactor, 1.35) * wind;
+                            ctx.drawImage(treesBg2DCanvas, bx0, sy, bw, sh, bx0 + swayX, Y0_TREES_LAMP + sy, bw, sh);
+                        }
                     }
                 }
 
@@ -2517,92 +2578,56 @@
                 // 3. 100% Canvas 2D Embankment Road, Concrete Curb, Lamp Plinth, 11 Bollards & Catenary Chains
                 ctx.drawImage(road2DCanvas, 0, Y0_ROAD);
 
-                // 4. Foreground Lower Leafy Tree Shoots (e.g. Tree 2 shoot overlapping Bollard 6)
+                // 4. Foreground Lower Leafy Tree Shoots
                 const shootSway = wind > 0.04 ? (Math.sin(t * 3.4 + 1.2) * 1.8 - 0.9) * wind : 0;
                 ctx.drawImage(treesFg2DCanvas, shootSway, Y0_TREES_LAMP);
             }
 
-
-
-            // Main Render & Update Loop
+            // Main Render & Update Loop with EMA frame-time smoothing for micro-stutter-free bicycle motion
             function renderFrame(timestamp) {
                 if (!state.lastTimestamp) state.lastTimestamp = timestamp;
                 const rawDt = (timestamp - state.lastTimestamp) / 1000;
                 state.lastTimestamp = timestamp;
-                // Exponential moving average on frame delta-time eliminates micro-stutter in bicycle motion
-                const clampedDt = Math.min(0.04, Math.max(0.004, rawDt || (1 / 60)));
-                state.smoothDt = state.smoothDt ? (state.smoothDt * 0.86 + clampedDt * 0.14) : clampedDt;
+                const clampedDt = (rawDt > 0 && rawDt < 0.12) ? rawDt : (1 / 60);
+                state.smoothDt = state.smoothDt * 0.82 + clampedDt * 0.18;
                 const dt = state.smoothDt;
 
                 if (state.running) {
                     state.time += dt;
 
-                    // Smoothly interpolate speed multiplier changes
-                    state.currentSpeedMult += (state.speedMult - state.currentSpeedMult) * Math.min(1, dt * 8);
-                    const activeSpeedMult = state.currentSpeedMult;
-
-                    // Update cyclists with gentle headway spacing so riders glide smoothly without bunching
+                    // Update cyclists with smooth frame delta
+                    const activeSpeedMult = state.speedMult;
                     for (let i = state.cyclists.length - 1; i >= 0; i--) {
                         const c = state.cyclists[i];
-                        let targetSpeed = c.speed;
-
-                        // Check for any cyclist ahead in the same direction to maintain comfortable spacing
-                        const minHeadway = 155;
-                        for (let j = 0; j < state.cyclists.length; j++) {
-                            if (i === j) continue;
-                            const other = state.cyclists[j];
-                            if (other.direction !== c.direction) continue;
-                            const gap = (other.x - c.x) * c.direction; // positive if `other` is ahead of `c`
-                            if (gap > 0 && gap < minHeadway) {
-                                const blend = Math.max(0, Math.min(1, (minHeadway - gap) / minHeadway));
-                                const pacedSpeed = Math.min(targetSpeed, (other.currentSpeed || other.speed) * (0.94 - 0.12 * blend));
-                                targetSpeed = Math.max(c.speed * 0.68, pacedSpeed);
-                            }
-                        }
-
-                        c.currentSpeed = (c.currentSpeed !== undefined ? c.currentSpeed : c.speed) +
-                            (targetSpeed - (c.currentSpeed !== undefined ? c.currentSpeed : c.speed)) * Math.min(1, dt * 4.5);
-
-                        const vx = c.direction * c.currentSpeed * activeSpeedMult;
+                        const vx = c.direction * c.speed * activeSpeedMult;
                         c.x += vx * dt;
 
-                        // Angular velocity of wheels = linear speed / wheelRadius
                         const dTheta = (Math.abs(vx) * dt) / c.wheelRadius;
-                        c.wheelAngle = (c.wheelAngle + dTheta) % (Math.PI * 2);
-                        // Relaxed, natural pedaling cadence (~0.31x wheel angular speed)
-                        c.crankAngle = (c.crankAngle + dTheta * 0.31) % (Math.PI * 2);
+                        c.wheelAngle += dTheta;
+                        c.crankAngle += dTheta * 0.40;
 
-                        // Remove cyclist once completely off-screen
                         if ((c.direction === -1 && c.x < -120) || (c.direction === 1 && c.x > W + 120)) {
                             state.cyclists.splice(i, 1);
                             updateBadgeCount();
                         }
                     }
 
-                    // Automatic traffic spawner (calmed pacing so the path never feels overloaded)
+                    // Automatic traffic spawner
                     if (state.trafficLevel > 0) {
                         state.spawnTimer -= dt * activeSpeedMult;
-                        const maxAllowed = state.trafficLevel === 1 ? 2 : (state.trafficLevel === 2 ? 3 : 5);
+                        const maxAllowed = state.trafficLevel === 1 ? 2 : (state.trafficLevel === 2 ? 4 : 7);
                         if (state.spawnTimer <= 0 && state.cyclists.length < maxAllowed) {
-                            // Ensure spawn entry zone is clear before introducing a new cyclist
-                            const edgeClear = !state.cyclists.some(c => c.x > W * 0.84 || c.x < W * 0.16);
-                            if (edgeClear) {
-                                const shouldPair = (state.cyclists.length + 2 <= maxAllowed) &&
-                                    (Math.random() < (state.trafficLevel >= 2 ? 0.25 : 0.12));
-                                spawnCyclist(shouldPair);
-                                const baseInterval = state.trafficLevel === 1 ? 6.2 : (state.trafficLevel === 2 ? 4.5 : 2.8);
-                                state.spawnTimer = baseInterval * (0.85 + Math.random() * 0.35);
-                            } else {
-                                state.spawnTimer = 1.0;
-                            }
+                            const shouldPair = Math.random() < (state.trafficLevel >= 2 ? 0.38 : 0.15);
+                            spawnCyclist(shouldPair);
+                            const baseInterval = state.trafficLevel === 1 ? 5.2 : (state.trafficLevel === 2 ? 3.2 : 1.7);
+                            state.spawnTimer = baseInterval * (0.75 + Math.random() * 0.55);
                         } else if (state.cyclists.length === 0) {
-                            // Never leave the embankment completely empty for long when traffic is enabled
                             spawnCyclist(true);
-                            state.spawnTimer = 4.5;
+                            state.spawnTimer = 3.5;
                         }
                     }
 
-                    // Update drifting Kashful seeds with lively wind gusts
+                    // Update drifting Kashful seeds
                     const seedGust = 1.0 + 0.55 * Math.sin(state.time * 2.2) + 0.35 * Math.cos(state.time * 3.8);
                     for (let i = 0; i < state.floatingSeeds.length; i++) {
                         const s = state.floatingSeeds[i];
@@ -2616,9 +2641,7 @@
                 }
 
                 // --- DRAW SCENE LAYERS ---
-                ctx.clearRect(0, 0, W, H);
-
-                // LAYER 1A: 100% Canvas 2D Sky & Cumulus Clouds (exact color, cauliflower silhouette & internal billows)
+                // LAYER 1A: 100% Canvas 2D Sky & Cumulus Clouds
                 if (skyAndCutoutReady) {
                     ctx.drawImage(sky2DCanvas, 0, 0);
                     const cloudDrift = Math.sin(state.time * 0.18) * 6.5 * Math.min(2.0, Math.max(0.3, state.windMult));
@@ -2626,20 +2649,19 @@
                     // LAYER 1B: 100% Canvas 2D Embankment Trees, Solar Streetlamp & Embankment Road Corridor
                     draw2DTreesAndLampWithBreeze(state.time);
                     // LAYER 1C: 100% Canvas 2D Embankment Grass, Reeds & Tuft Underlayer
-                    // Always draw the stationary opaque embankment grass base first so zero dark background seams or edge gaps can ever appear
                     ctx.drawImage(midgroundCutoutCanvas, 0, 0);
                     if (state.windMult > 0.04) {
                         const gTopH = Y0_KASH + 42;
-                        const gBands = 20;
+                        const gBands = 10;
                         const gRemH = H - gTopH;
                         const gBandH = Math.ceil(gRemH / gBands);
                         const gGust = 0.75 + 0.55 * Math.sin(state.time * 2.4 - 0.4) + 0.30 * Math.cos(state.time * 4.1);
                         for (let gb = 0; gb < gBands; gb++) {
                             const gy = gTopH + gb * gBandH;
-                            const gbh = Math.min(gBandH + 3, H - gy);
+                            const gbh = Math.min(gBandH + 2, H - gy);
                             if (gbh <= 0) break;
                             const gDepth = (gb + 1) / gBands;
-                            const gWave = Math.sin(state.time * 3.4 + gb * 0.38 - 0.35) * 4.2 + Math.cos(state.time * 5.2 - gb * 0.25) * 1.8 - 2.6 * gGust;
+                            const gWave = Math.sin(state.time * 3.4 + gb * 0.65 - 0.35) * 4.2 + Math.cos(state.time * 5.2 - gb * 0.45) * 1.8 - 2.6 * gGust;
                             const gShiftX = gWave * Math.pow(gDepth, 0.85) * state.windMult;
                             const gPadX = Math.ceil(Math.abs(gShiftX)) + 2;
                             ctx.drawImage(midgroundCutoutCanvas, 0, gy, W, gbh, gShiftX - gPadX * 0.5, gy, W + gPadX, gbh);
@@ -2648,10 +2670,13 @@
                 }
 
                 // LAYER 2: Passing Bicycles & Riders on the Embankment Path
-                // Sort slightly by scale so smaller/further riders render behind larger/closer riders
-                const sortedCyclists = state.cyclists.slice().sort((a, b) => a.scale - b.scale);
-                for (let i = 0; i < sortedCyclists.length; i++) {
-                    drawCyclist(sortedCyclists[i]);
+                if (state.cyclists.length === 1) {
+                    drawCyclist(state.cyclists[0]);
+                } else if (state.cyclists.length > 1) {
+                    state.cyclists.sort((a, b) => a.scale - b.scale);
+                    for (let i = 0; i < state.cyclists.length; i++) {
+                        drawCyclist(state.cyclists[i]);
+                    }
                 }
 
                 // LAYER 3A: Foreground Grass Occlusion Crest (occludes lower ~35% of bicycle wheels)
@@ -2659,20 +2684,20 @@
                     ctx.drawImage(fgCrestCanvas, 0, CREST_Y0);
                 }
 
-                // LAYER 3B: 100% Canvas 2D Kashful Plumes & Feathery Barbs (40,200 multi-scale oriented 2D feather strokes with seamless wind wave)
+                // LAYER 3B: 100% Canvas 2D Kashful Plumes & Feathery Barbs
                 if (skyAndCutoutReady) {
                     if (state.windMult > 0.04) {
-                        const numBands = 32;
+                        const numBands = 14;
                         const bandH = Math.ceil(H_KASH / numBands);
                         const kGust = 0.80 + 0.60 * Math.sin(state.time * 2.35) + 0.35 * Math.sin(state.time * 4.3 + 0.7);
                         for (let b = 0; b < numBands; b++) {
                             const ky = b * bandH;
-                            const bh = Math.min(bandH + 3, H_KASH - ky);
+                            const bh = Math.min(bandH + 2, H_KASH - ky);
                             if (bh <= 0) break;
                             const depthFactor = Math.pow((b + 1) / numBands, 0.82);
-                            const travelWave = Math.sin(state.time * 3.8 - b * 0.32) * 9.5
-                                + Math.cos(state.time * 6.1 - b * 0.48) * 4.2
-                                + Math.sin(state.time * 1.9 + b * 0.22) * 5.0
+                            const travelWave = Math.sin(state.time * 3.8 - b * 0.68) * 9.5
+                                + Math.cos(state.time * 6.1 - b * 1.02) * 4.2
+                                + Math.sin(state.time * 1.9 + b * 0.48) * 5.0
                                 - 6.8 * kGust;
                             const shiftX = travelWave * depthFactor * state.windMult;
                             const kPadX = Math.ceil(Math.abs(shiftX)) + 2;
@@ -2773,6 +2798,7 @@
             });
 
             // Boot animation
+            for (let i = 0; i < ARCHETYPES.length; i++) getCyclistSprites(ARCHETYPES[i]);
             initEnvironmentDetails();
             resetToReferencePose();
             requestAnimationFrame(renderFrame);
